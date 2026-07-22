@@ -1,0 +1,14 @@
+deepagents==0.6.12
+langchain-core==1.4.9
+langchain-openai
+yfinance==1.5.1
+pandas==2.3.1
+python-dotenv==1.1.1
+ccxt==4.5.67
+wbdata==1.1.0
+python-bcb==0.4.0
+langfuse==4.14.1
+mcp[cli]==1.28.1
+langchain-mcp-adapters==0.3.0
+fastapi==0.139.2
+uvicorn==0.51.0
