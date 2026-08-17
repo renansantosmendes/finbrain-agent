@@ -33,6 +33,15 @@ from pydantic import BaseModel, Field
 
 from deepagents import create_deep_agent
 from deepagents.backends.filesystem import FilesystemBackend
+from langchain.agents.middleware import (
+    ContextEditingMiddleware,
+    ModelCallLimitMiddleware,
+    ModelFallbackMiddleware,
+    PIIMiddleware,
+    ToolCallLimitMiddleware,
+    ToolErrorMiddleware,
+    ToolRetryMiddleware,
+)
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langfuse.langchain import CallbackHandler
@@ -42,6 +51,48 @@ import persistence
 from logging_config import logger
 
 MCP_URL = "https://finbrain-mcp.vercel.app/mcp"
+MODEL = "openai:gpt-5-nano"
+FALLBACK_MODEL = "openai:gpt-4o-mini"
+
+
+def _on_tool_error(exc: Exception, request) -> str:
+    """Turn a tool-execution exception into a message the model can react to.
+
+    Named after the exception type only (not str(exc)) since the raw message
+    can carry internal detail (stack traces, connection strings) we don't
+    want reaching the model or, downstream, the user.
+    """
+    tool_name = request.tool_call["name"]
+    logger.warning("tool error: %s raised %s", tool_name, type(exc).__name__)
+    return f"A ferramenta `{tool_name}` falhou ({type(exc).__name__}). Tente novamente ou ajuste os parâmetros."
+
+
+def _build_middleware() -> list:
+    """Production-hardening middleware. See README for the rationale per item.
+
+    Order matters: earlier entries are outermost (langchain.agents.middleware
+    docs: "first defined = outermost"). ToolErrorMiddleware must wrap
+    ToolRetryMiddleware -- retries happen first, and only once they're
+    exhausted (on_failure="error" makes the retry middleware re-raise) does
+    the error middleware turn the exception into a message instead of a hard
+    500.
+
+    Not listed here: summarization. create_deep_agent already inserts its own
+    (deepagents' SummarizationMiddleware, a superset of LangChain's -- it also
+    offloads evicted history to a backend file and recovers from context
+    overflow) into every agent's base stack unconditionally. Adding another
+    one collides by middleware name and create_agent rejects the duplicate.
+    """
+    return [
+        ToolErrorMiddleware(_on_tool_error),
+        ToolRetryMiddleware(max_retries=3, on_failure="error"),
+        ModelFallbackMiddleware(FALLBACK_MODEL),
+        ModelCallLimitMiddleware(run_limit=15, exit_behavior="end"),
+        ToolCallLimitMiddleware(run_limit=20),
+        PIIMiddleware("email", strategy="redact"),
+        PIIMiddleware("credit_card", strategy="redact"),
+        ContextEditingMiddleware(),
+    ]
 
 # Must be the actual project directory (not "." / not /tmp): create_deep_agent
 # resolves skills=["skills"] relative to this same root_dir, and skills/ only
@@ -85,12 +136,13 @@ class AgentRuntime:
         await checkpointer.setup()
 
         self.agent = create_deep_agent(
-            model="openai:gpt-5-nano",
+            model=MODEL,
             tools=tools,
             skills=["skills"],
             backend=backend,
             system_prompt=system_prompt,
             checkpointer=checkpointer,
+            middleware=_build_middleware(),
         )
         logger.info("startup: agent ready")
 

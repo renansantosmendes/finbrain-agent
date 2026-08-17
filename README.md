@@ -46,6 +46,21 @@ O agente usa memória real entre turnos, e essa memória sobrevive a reinícios 
 
 Ver [persistence.py](persistence.py) para os detalhes de conexão (schema via `search_path`, contorno do pooler do Neon).
 
+### Middlewares de produção
+
+`app.py` (`_build_middleware`) adiciona ao agente, além do que o `create_deep_agent` já inclui por padrão (`TodoListMiddleware`, `SkillsMiddleware`, `SummarizationMiddleware` própria do deepagents, etc.):
+
+| Middleware | Por quê |
+|---|---|
+| `ToolErrorMiddleware` | Converte exceção de tool (ex.: ticker inválido) em `ToolMessage` de erro pro modelo reagir, em vez de derrubar a run com 500. |
+| `ToolRetryMiddleware` | As tools vêm de um servidor MCP remoto por HTTP — retry com backoff antes de desistir (`on_failure="error"` para a exceção chegar no `ToolErrorMiddleware` acima). |
+| `ModelFallbackMiddleware` | Troca pra `openai:gpt-4o-mini` se `gpt-5-nano`/OpenAI falhar — o agente é a única via de resposta da API. |
+| `ModelCallLimitMiddleware` / `ToolCallLimitMiddleware` | Teto de chamadas de modelo/tool por execução — proteção contra loop descontrolado e custo inesperado. |
+| `PIIMiddleware` (`email`, `credit_card`) | Redige PII do input do usuário antes de seguir pro modelo/Langfuse. |
+| `ContextEditingMiddleware` | Poda resultados antigos de tool do histórico (ex.: JSON grande da simulação GARCH) pra não inflar contexto/custo em sessões longas. |
+
+> **Gap conhecido:** `PIIMiddleware` redige o conteúdo que chega ao modelo e ao Langfuse, mas `persistence.log_message` grava a mensagem do usuário **antes** do agente rodar — ou seja, o texto original (com PII) ainda vai em texto puro pra tabela `agent_conversations.messages`. Não corrigido aqui; se isso importa pro seu caso, mova o log da mensagem do usuário para depois da execução do agente, lendo `result["messages"]` (já redigido) em vez de `request.message`.
+
 ---
 
 ## Estrutura do repositório
