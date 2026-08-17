@@ -17,7 +17,7 @@ from langfuse import Langfuse
 langfuse = Langfuse()
 langfuse_handler = CallbackHandler()
 
-finbrain_system_prompt = langfuse.get_prompt("FINBRAIN_SYSTEM_PROMPT")
+finbrain_system_prompt = langfuse.get_prompt("FINBRAIN_SYSTEM_PROMPT").compile()
 
 
 MCP_URL = "https://finbrain-mcp.vercel.app/mcp"
@@ -45,7 +45,7 @@ async def main(url: str) -> None:
         system_prompt=finbrain_system_prompt,
     )
 
-    inputs = {"messages": [{"role": "user", "content": "Gere um gráfico da ação da Microsoft (MSFT) do último mês, com base nos dados históricos de preços."}]}
+    inputs = {"messages": [{"role": "user", "content": "Estime qual seria o comportamento da ação da Microsoft (MSFT) no próximo mês, com base nos dados históricos de preços."}]}
     
     config = {
         "configurable": {"thread_id": "financial-agent-thread"},
