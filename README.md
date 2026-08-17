@@ -35,7 +35,16 @@ Pergunta do usuário
 
 ### Observabilidade
 
-Todas as execuções são rastreadas no **Langfuse** (`CallbackHandler`), com `session_id` e tags (`skills-demo`, `financial-agent`). O prompt de sistema também é buscado do Langfuse (`langfuse.get_prompt("FINBRAIN_SYSTEM_PROMPT")`), o que permite versionar e alterar o comportamento base do agente sem novo deploy.
+Todas as execuções são rastreadas no **Langfuse** (`CallbackHandler`), com `session_id` e tags (`skills-demo`, `financial-agent`). O prompt de sistema também é buscado do Langfuse (`langfuse.get_prompt("FINBRAIN_SYSTEM_PROMPT")`), o que permite versionar e alterar o comportamento base do agente sem novo deploy. Todos os módulos (`app.py`, `main_mcp.py`, `persistence.py`) também emitem logs estruturados via `logging_config.py` (logger `finbrain`).
+
+### Persistência de conversas
+
+O agente usa memória real entre turnos, e essa memória sobrevive a reinícios de processo (incluindo cold starts em serverless) porque nada fica só em RAM — tudo vive no Postgres (Neon), no schema dedicado `agent_conversations`:
+
+- **Checkpoints do LangGraph** (`AsyncPostgresSaver`) — estado completo da conversa por `thread_id`/`session_id`, o que dá ao agente memória de fato.
+- **Tabela `messages`** — log legível (thread_id, role, content, created_at) para consulta/auditoria fora do formato interno do LangGraph.
+
+Ver [persistence.py](persistence.py) para os detalhes de conexão (schema via `search_path`, contorno do pooler do Neon).
 
 ---
 
@@ -43,10 +52,15 @@ Todas as execuções são rastreadas no **Langfuse** (`CallbackHandler`), com `s
 
 ```
 finbrain-agent/
-├── main_mcp.py          # ponto de entrada: monta o agente e consome as tools do MCP
-├── requirements.txt     # dependências
-├── .env                 # chaves de API (não versionado)
-└── skills/              # skills em Markdown que orientam o agente
+├── main_mcp.py          # script de demonstração: roda o agente uma vez via CLI
+├── app.py                # API FastAPI (rota /chat) para conversar com o agente por HTTP
+├── persistence.py        # schema Postgres (Neon), checkpointer do LangGraph, log de mensagens
+├── logging_config.py     # configuração do logger "finbrain"
+├── requirements.txt      # dependências
+├── pytest.ini             # config dos testes
+├── tests/                 # testes unitários (persistence.py e app.py)
+├── .env                   # chaves de API (não versionado)
+└── skills/                # skills em Markdown que orientam o agente
     ├── stock_analysis/
     ├── fundamental_analysis/
     ├── technical_analysis/
@@ -118,14 +132,18 @@ OPENAI_API_KEY=...
 
 LANGFUSE_PUBLIC_KEY=...
 LANGFUSE_SECRET_KEY=...
-LANGFUSE_HOST=https://cloud.langfuse.com
+LANGFUSE_HOST=https://cloud.langfuse.com   # ou https://us.cloud.langfuse.com, conforme a região do projeto
+
+NEON_DATABASE_URL=postgresql://...          # usado para persistência de conversas
 ```
 
-O Langfuse é obrigatório na configuração atual, porque o prompt de sistema é carregado de lá.
+O Langfuse é obrigatório na configuração atual, porque o prompt de sistema é carregado de lá. `NEON_DATABASE_URL` é obrigatório para rodar `app.py` (API) e para as chamadas do `main_mcp.py` que usam checkpointer — veja **Persistência de conversas** acima.
 
 ---
 
 ## Uso
+
+### Script de demonstração (CLI)
 
 Contra o servidor MCP publicado:
 
@@ -139,11 +157,36 @@ Contra um servidor MCP local ou alternativo:
 python main_mcp.py http://localhost:8000/mcp
 ```
 
-A pergunta enviada ao agente está fixa em [main_mcp.py:48](main_mcp.py#L48) — altere-a para testar outros cenários:
+A pergunta enviada ao agente está fixa em [main_mcp.py:64](main_mcp.py#L64) — altere-a para testar outros cenários.
 
-```python
-inputs = {"messages": [{"role": "user", "content": "Qual a Selic atual?"}]}
+### API HTTP (`app.py`)
+
+```bash
+python app.py
 ```
+
+> No Windows, use `python app.py` (não `uvicorn app:app` direto) — veja o comentário no `__main__` de [app.py](app.py) sobre por que o loop de eventos do uvicorn quebra o driver async do Postgres nesse SO. Em produção (Linux/Vercel) isso não é um problema.
+
+Rota principal:
+
+```
+POST /chat
+{
+  "message": "Qual o preço atual da PETR4?",
+  "session_id": "opcional — se omitido, um UUID novo é gerado e devolvido na resposta"
+}
+```
+
+Reenviar o mesmo `session_id` em requisições seguintes mantém o histórico da conversa — a memória vive no Postgres (ver acima), não em RAM, então sobrevive a reinícios do processo.
+
+### Testes
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+Os testes (`tests/`) não tocam serviços reais: o agente, o checkpointer e o log de mensagens são mockados/injetados via `app.dependency_overrides`.
 
 ---
 
@@ -194,7 +237,9 @@ Boas práticas observadas nas skills atuais:
 | `python-bcb` | Séries do Banco Central do Brasil |
 | `wbdata` | Indicadores do Banco Mundial |
 | `arch` | Modelagem GARCH para simulação de cenários (lado do MCP) |
-| `fastapi` / `uvicorn` | Servidor MCP |
+| `fastapi` / `uvicorn` | API HTTP do agente (`app.py`) |
+| `langgraph-checkpoint-postgres` / `psycopg` | Persistência de conversas no Neon (`persistence.py`) |
+| `pytest` / `pytest-asyncio` | Testes unitários |
 
 ---
 
