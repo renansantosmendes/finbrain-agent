@@ -1,10 +1,9 @@
 {
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/api/index.py" }
-  ],
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
-    "api/index.py": {
-      "maxDuration": 60
+    "app.py": {
+      "maxDuration": 60,
+      "excludeFiles": "{tests/**,.github/**,skills/**/__pycache__/**}"
     }
   }
 }

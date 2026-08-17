@@ -53,10 +53,8 @@ Ver [persistence.py](persistence.py) para os detalhes de conexão (schema via `s
 ```
 finbrain-agent/
 ├── main_mcp.py           # script de demonstração: roda o agente uma vez via CLI
-├── app.py                # API FastAPI (rota /chat) para conversar com o agente por HTTP
-├── api/
-│   └── index.py          # entrypoint do Vercel: apenas reexporta `app` de app.py
-├── vercel.json            # rewrites + config da função serverless
+├── app.py                # API FastAPI (rota /chat) — também o entrypoint que o Vercel detecta
+├── vercel.json            # config da função serverless (maxDuration, excludeFiles)
 ├── persistence.py        # schema Postgres (Neon), checkpointer do LangGraph, log de mensagens
 ├── logging_config.py     # configuração do logger "finbrain"
 ├── requirements.txt      # dependências de produção (também usado pelo Vercel)
@@ -120,12 +118,14 @@ Fonte: Banco Mundial via `wbdata`. Códigos de país em ISO de 3 letras (`BRA`, 
 
 ## Deploy no Vercel
 
-A API (`app.py`) está pronta para deploy como função serverless Python no Vercel:
+A API (`app.py`) está pronta para deploy como função serverless Python no Vercel usando o runtime Python **zero-config**: o Vercel detecta automaticamente uma instância `FastAPI` chamada `app` em `app.py` (ou `index.py`/`server.py`/`main.py`) na raiz do projeto — não é preciso pasta `api/` nem `rewrites` manuais.
 
-- **[api/index.py](api/index.py)** — entrypoint que o Vercel detecta automaticamente (`from app import app`). Não duplica lógica, só reexporta.
-- **[vercel.json](vercel.json)** — reescreve todas as rotas para `api/index.py` (necessário para que `/health` e `/chat` funcionem via FastAPI) e define `maxDuration: 60` para a função, já que uma resposta do agente (LLM + tools do MCP + Postgres) pode levar bem mais que os 10s padrão do plano Hobby. **Ajuste esse valor conforme o limite do seu plano Vercel** — Hobby sem Fluid Compute trava em 10s.
-- **[.python-version](.python-version)** — fixa `3.12` (verifique nas [runtimes suportadas pelo Vercel](https://vercel.com/docs/functions/runtimes/python) se a versão ainda é válida no momento do deploy).
+- **`app.py`** — já expõe `app = FastAPI(..., lifespan=lifespan)` na raiz; é o próprio entrypoint. Startup/shutdown do FastAPI (`AgentRuntime.startup`/`shutdown`) são suportados nativamente pelo runtime.
+- **[vercel.json](vercel.json)** — configura a função resolvida (`app.py`): `maxDuration: 60`, já que uma resposta do agente (LLM + tools do MCP + Postgres) pode levar bem mais que os 10s padrão de planos sem Fluid Compute (o Vercel usa Fluid Compute por padrão hoje, mas confira o limite do seu plano), e `excludeFiles` para não empacotar `tests/`, `.github/` etc. no bundle da função.
+- **[.python-version](.python-version)** — fixa `3.12` (as versões suportadas atualmente pelo Vercel são 3.12, 3.13 e 3.14 — confira em [runtimes Python do Vercel](https://vercel.com/docs/functions/runtimes/python) se ainda está atual no momento do deploy).
 - **[.vercelignore](.vercelignore)** — exclui `.venv/`, `tests/`, `.github/`, `.env` etc. do pacote enviado.
+
+> Já existiu aqui uma estrutura com `api/index.py` + `rewrites` no `vercel.json` — isso é o padrão **legado** do runtime Python do Vercel (pasta `/api` com roteamento por arquivo) e **conflita** com a auto-detecção do `app.py` na raiz, causando deploys que não respondem a nenhuma rota e não geram log algum. Foi removido — use só `app.py` na raiz.
 
 ### Passos
 
