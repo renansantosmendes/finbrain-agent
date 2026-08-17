@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"c:/00 - Source Codes/finbrain-agent\" && sed 's/=.*/=<...>/' .env && echo \"---MODIFIED---\" && git diff main_mcp.py | head -40)"
+    ],
+    "additionalDirectories": [
+      "c:\\00 - Source Codes\\finbrain-agent"
+    ]
+  }
+}

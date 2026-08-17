@@ -51,6 +51,7 @@ finbrain-agent/
     ├── fundamental_analysis/
     ├── technical_analysis/
     ├── asset_comparison/
+    ├── market_scenario_simulation/
     ├── cripto/
     ├── macro_brasil/
     └── macro_global/
@@ -70,6 +71,7 @@ Sete skills cobrem quatro domínios. A documentação detalhada de cada uma est�
 | [`fundamental-analysis`](skills/fundamental_analysis/SKILL.md) | "Está cara ou barata?", balanço, P/L, ROE, endividamento | `collect_fundamental_indicators` |
 | [`technical-analysis`](skills/technical_analysis/SKILL.md) | Gráfico, tendência, RSI, MACD, médias móveis | `collect_technical_indicators` |
 | [`asset-comparison`](skills/asset_comparison/SKILL.md) | Dois ou mais tickers na mesma pergunta | `compare_assets` |
+| [`market-scenario-simulation`](skills/market_scenario_simulation/SKILL.md) | Projeção de cenários futuros, simulação de mercado, Monte Carlo | `generate_synthetic_stock_series_garch_arch` |
 
 ### ₿ Criptomoedas
 
@@ -191,6 +193,7 @@ Boas práticas observadas nas skills atuais:
 | `ccxt` | Dados de criptomoedas |
 | `python-bcb` | Séries do Banco Central do Brasil |
 | `wbdata` | Indicadores do Banco Mundial |
+| `arch` | Modelagem GARCH para simulação de cenários (lado do MCP) |
 | `fastapi` / `uvicorn` | Servidor MCP |
 
 ---

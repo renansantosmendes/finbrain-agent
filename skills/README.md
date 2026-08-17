@@ -23,6 +23,7 @@ Voltar para o [README principal](../README.md).
 | [`fundamental-analysis`](#-fundamental-analysis) | Ações | [fundamental_analysis/](fundamental_analysis/SKILL.md) |
 | [`technical-analysis`](#-technical-analysis) | Ações | [technical_analysis/](technical_analysis/SKILL.md) |
 | [`asset-comparison`](#️-asset-comparison) | Ações | [asset_comparison/](asset_comparison/SKILL.md) |
+| [`market-scenario-simulation`](#-market-scenario-simulation) | Ações | [market_scenario_simulation/](market_scenario_simulation/SKILL.md) |
 | [`cripto`](#-cripto) | Criptomoedas | [cripto/](cripto/SKILL.md) |
 | [`macro-brasil`](#-macro-brasil) | Macro Brasil | [macro_brasil/](macro_brasil/SKILL.md) |
 | [`macro-global`](#-macro-global) | Macro Global | [macro_global/](macro_global/SKILL.md) |
@@ -95,6 +96,21 @@ Voltar para o [README principal](../README.md).
   - Sem critério explícito, apresentar os três (preço/variação, P/L, dividend yield) e destacar o líder em cada um.
   - Nunca afirmar categoricamente qual é "o melhor".
 - **Saída:** tabela comparativa `⚖️ Comparação de Ativos`, `🧠 Avaliação da IA` e disclaimer.
+
+---
+
+## 🎲 `market-scenario-simulation`
+
+**Projeção de cenários futuros e simulação de mercado via GARCH(1,1).**
+
+- **Gatilhos:** "simule cenários", "range de preços futuros", "projeção de preço", "simulação de Monte Carlo", "cenário otimista/pessimista", "volatilidade esperada".
+- **Não usar para:** preço/histórico já observado (`stock-analysis`), fundamentos (`fundamental-analysis`) ou tendência de gráfico passado (`technical-analysis`) — esta é a única skill que projeta preços **futuros**.
+- **Ferramentas:** `collect_yfinance_data(ticker, period="5d")` para o preço base, seguido de `generate_synthetic_stock_series_garch_arch(ticker, start_date, n_days, n_series, initial_price, ...)`.
+- **Regras de interpretação:**
+  - Sem horizonte informado, `n_days=30`; sem nº de simulações, `n_series=100`.
+  - `mode="simulate"` com parâmetros GARCH padrão da ferramenta, salvo se o usuário fornecer retornos históricos explícitos (`mode="fit_and_simulate"`).
+  - Agregar os valores finais de todas as séries: P10 = cenário pessimista, mediana = cenário base, P90 = cenário otimista.
+- **Saída:** bloco `🎲 Simulação de Cenários` com tabela de 3 cenários (preço e variação %), `🧠 Avaliação da IA` e aviso reforçando que é uma simulação estatística, não uma previsão garantida.
 
 ---
 

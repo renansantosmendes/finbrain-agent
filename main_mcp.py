@@ -11,6 +11,14 @@ load_dotenv()
 from deepagents import create_deep_agent
 from deepagents.backends.filesystem import FilesystemBackend
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langfuse.langchain import CallbackHandler
+from langfuse import Langfuse
+
+langfuse = Langfuse()
+langfuse_handler = CallbackHandler()
+
+finbrain_system_prompt = langfuse.get_prompt("FINBRAIN_SYSTEM_PROMPT")
+
 
 MCP_URL = "https://finbrain-mcp.vercel.app/mcp"
 
@@ -19,7 +27,6 @@ backend = FilesystemBackend(
     virtual_mode=False,
 )
 
-
 async def main(url: str) -> None:
     client = MultiServerMCPClient({
         "finbrain": {
@@ -27,6 +34,7 @@ async def main(url: str) -> None:
             "url": url,
         },
     })
+    
     tools = await client.get_tools()
 
     agent = create_deep_agent(
@@ -34,10 +42,20 @@ async def main(url: str) -> None:
         tools=tools,
         skills=["skills"],
         backend=backend,
+        system_prompt=finbrain_system_prompt,
     )
 
-    inputs = {"messages": [{"role": "user", "content": "PETR4 está cara ou barata pelos fundamentos?"}]}
-    config = {"configurable": {"thread_id": "investidor_01"}}
+    inputs = {"messages": [{"role": "user", "content": "Gere um gráfico da ação da Microsoft (MSFT) do último mês, com base nos dados históricos de preços."}]}
+    
+    config = {
+        "configurable": {"thread_id": "financial-agent-thread"},
+        "callbacks": [langfuse_handler],
+        "metadata": {
+            "langfuse_session_id": "financial-agent-thread",
+            "langfuse_tags": ["skills-demo", "financial-agent"],
+        },
+    }
+    
 
     async for chunk in agent.astream(inputs, config):
         print(chunk)
