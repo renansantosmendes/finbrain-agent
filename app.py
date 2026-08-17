@@ -43,10 +43,17 @@ from logging_config import logger
 
 MCP_URL = "https://finbrain-mcp.vercel.app/mcp"
 
-# Vercel's filesystem is read-only outside of /tmp in production. Locally
-# (no VERCEL env var) keep writing to the project dir like main_mcp.py does.
-_backend_root = "/tmp" if os.environ.get("VERCEL") else "."
-backend = FilesystemBackend(root_dir=_backend_root, virtual_mode=False)
+# Must be the actual project directory (not "." / not /tmp): create_deep_agent
+# resolves skills=["skills"] relative to this same root_dir, and skills/ only
+# exists in the deployed bundle, never under /tmp. Using an absolute path also
+# keeps this correct regardless of Vercel's working directory at runtime.
+#
+# Tradeoff: Vercel's filesystem is read-only outside of /tmp in production, so
+# any tool that tries to *write* a file (e.g. save a generated chart) will
+# fail there. Only relevant if/when such a tool is added -- see README's
+# "Limitações conhecidas em produção serverless" section.
+_project_root = os.path.dirname(os.path.abspath(__file__))
+backend = FilesystemBackend(root_dir=_project_root, virtual_mode=False)
 
 
 class AgentRuntime:
