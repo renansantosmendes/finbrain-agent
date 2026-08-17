@@ -186,7 +186,11 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Os testes (`tests/`) não tocam serviços reais: o agente, o checkpointer e o log de mensagens são mockados/injetados via `app.dependency_overrides`.
+Os testes (`tests/`) não tocam serviços reais: o agente, o checkpointer e o log de mensagens são mockados/injetados via `app.dependency_overrides` — por isso rodam sem `.env`/credenciais, inclusive no CI.
+
+### CI
+
+[.github/workflows/ci.yml](.github/workflows/ci.yml) roda `pytest` no GitHub Actions em três gatilhos: abertura/novo commit em PR contra `main`, e push direto em `main` (que também cobre merge de PR).
 
 ---
 
