@@ -14,6 +14,7 @@ Persistence model (see persistence.py):
   source of truth for conversation history.
 """
 import asyncio
+import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
@@ -42,7 +43,10 @@ from logging_config import logger
 
 MCP_URL = "https://finbrain-mcp.vercel.app/mcp"
 
-backend = FilesystemBackend(root_dir=".", virtual_mode=False)
+# Vercel's filesystem is read-only outside of /tmp in production. Locally
+# (no VERCEL env var) keep writing to the project dir like main_mcp.py does.
+_backend_root = "/tmp" if os.environ.get("VERCEL") else "."
+backend = FilesystemBackend(root_dir=_backend_root, virtual_mode=False)
 
 
 class AgentRuntime:

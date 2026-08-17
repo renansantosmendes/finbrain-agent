@@ -1,0 +1,11 @@
+.venv
+__pycache__
+*.pyc
+tests
+pytest.ini
+requirements-dev.txt
+.env
+.git
+.github
+uvicorn.log
+run2.log

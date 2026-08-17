@@ -52,13 +52,18 @@ Ver [persistence.py](persistence.py) para os detalhes de conexão (schema via `s
 
 ```
 finbrain-agent/
-├── main_mcp.py          # script de demonstração: roda o agente uma vez via CLI
+├── main_mcp.py           # script de demonstração: roda o agente uma vez via CLI
 ├── app.py                # API FastAPI (rota /chat) para conversar com o agente por HTTP
+├── api/
+│   └── index.py          # entrypoint do Vercel: apenas reexporta `app` de app.py
+├── vercel.json            # rewrites + config da função serverless
 ├── persistence.py        # schema Postgres (Neon), checkpointer do LangGraph, log de mensagens
 ├── logging_config.py     # configuração do logger "finbrain"
-├── requirements.txt      # dependências
+├── requirements.txt      # dependências de produção (também usado pelo Vercel)
+├── requirements-dev.txt  # + pytest, para CI/dev local
 ├── pytest.ini             # config dos testes
 ├── tests/                 # testes unitários (persistence.py e app.py)
+├── .github/workflows/ci.yml  # roda pytest em PRs e pushes na main
 ├── .env                   # chaves de API (não versionado)
 └── skills/                # skills em Markdown que orientam o agente
     ├── stock_analysis/
@@ -110,6 +115,29 @@ Fonte: Banco Central do Brasil via `python-bcb`.
 | [`macro-global`](skills/macro_global/SKILL.md) | PIB, inflação, desemprego, população de qualquer país | `get_world_bank_indicator`, `search_world_bank_indicator`, `compare_countries_latest` |
 
 Fonte: Banco Mundial via `wbdata`. Códigos de país em ISO de 3 letras (`BRA`, `USA`, `CHN`).
+
+---
+
+## Deploy no Vercel
+
+A API (`app.py`) está pronta para deploy como função serverless Python no Vercel:
+
+- **[api/index.py](api/index.py)** — entrypoint que o Vercel detecta automaticamente (`from app import app`). Não duplica lógica, só reexporta.
+- **[vercel.json](vercel.json)** — reescreve todas as rotas para `api/index.py` (necessário para que `/health` e `/chat` funcionem via FastAPI) e define `maxDuration: 60` para a função, já que uma resposta do agente (LLM + tools do MCP + Postgres) pode levar bem mais que os 10s padrão do plano Hobby. **Ajuste esse valor conforme o limite do seu plano Vercel** — Hobby sem Fluid Compute trava em 10s.
+- **[.python-version](.python-version)** — fixa `3.12` (verifique nas [runtimes suportadas pelo Vercel](https://vercel.com/docs/functions/runtimes/python) se a versão ainda é válida no momento do deploy).
+- **[.vercelignore](.vercelignore)** — exclui `.venv/`, `tests/`, `.github/`, `.env` etc. do pacote enviado.
+
+### Passos
+
+1. Importe o repositório no [dashboard do Vercel](https://vercel.com/new) (framework preset: "Other").
+2. Configure as variáveis de ambiente do projeto (Settings → Environment Variables) com os mesmos valores do `.env` local: `OPENAI_API_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`, `NEON_DATABASE_URL`.
+3. Deploy. A cada push, o Vercel builda e publica; o CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) roda os testes antes disso no PR.
+
+### Limitações conhecidas em produção serverless
+
+- **Filesystem:** `app.py` já detecta a env var `VERCEL` (setada automaticamente pelo Vercel) e usa `/tmp` como `root_dir` do `FilesystemBackend` em vez do diretório do projeto, que é somente leitura em produção. Mas **`/tmp` não é compartilhado nem persistente entre invocações** — um arquivo (ex.: gráfico) gerado numa chamada não estará disponível numa chamada seguinte, mesmo na mesma sessão. Se o agente precisar devolver gráficos/arquivos via API, isso vai exigir mudar a estratégia (ex.: subir para um bucket e retornar a URL) — não implementado aqui.
+- **Cold start:** a primeira requisição após um cold start busca o prompt do Langfuse e as tools do MCP de novo (alguns segundos) — ver comentário em `AgentRuntime.startup` em [app.py](app.py). O histórico de conversa em si não é afetado (fica no Postgres, ver **Persistência de conversas** acima).
+- **Tamanho do pacote:** as dependências (`pandas`, `langchain`, `psycopg[binary]`, etc.) são razoáveis, mas vale observar o build do Vercel na primeira tentativa por limites de tamanho de função.
 
 ---
 
