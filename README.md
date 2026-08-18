@@ -35,7 +35,9 @@ Pergunta do usuário
 
 ### Observabilidade
 
-Todas as execuções são rastreadas no **Langfuse** (`CallbackHandler`), com `session_id` e tags (`skills-demo`, `financial-agent`). O prompt de sistema também é buscado do Langfuse (`langfuse.get_prompt("FINBRAIN_SYSTEM_PROMPT")`), o que permite versionar e alterar o comportamento base do agente sem novo deploy. Todos os módulos (`app.py`, `main_mcp.py`, `persistence.py`) também emitem logs estruturados via `logging_config.py` (logger `finbrain`).
+Todas as execuções são rastreadas no **Langfuse** (`CallbackHandler`), com `session_id` e tags (`skills-demo`, `financial-agent`). O prompt de sistema também é buscado do Langfuse (`langfuse.get_prompt("FINBRAIN_SYSTEM_PROMPT")`), o que permite versionar e alterar o comportamento base do agente sem novo deploy. Todos os módulos (`app.py`, `main_mcp.py`, `persistence.py`) também emitem logs estruturados via `logging_config.py` (logger `finbrain`). Após cada execução, chamamos `langfuse.flush()` explicitamente (`AgentRuntime.shutdown` e no `finally` do handler `/chat`) — o SDK envia spans/custo em background, e sem isso um processo de vida curta (serverless, ou o script `main_mcp.py`) pode terminar antes dos dados chegarem ao Langfuse.
+
+> **Gap conhecido:** custo/uso/modelo **não** aparecem nas traces de chamadas reais do agente (via `create_deep_agent` + middlewares) — o nó do LLM é registrado como um `CHAIN` genérico chamado `"model"`, não como `GENERATION`, então fica sem custo algum. Confirmado isolando uma chamada simples de `ChatOpenAI` (que funciona perfeitamente — custo e tokens corretos) contra uma chamada real via `/chat` (custo zerado). Parece ser um gap de integração entre a arquitetura de middlewares do `langchain` 1.x (usada pelo `deepagents`) e o instrumentador OTEL do pacote `langfuse-langchain` 4.14.1. Não investigado a fundo nem corrigido. Se monitorar custo do agente é crítico, considere logar `usage_metadata` da resposta do modelo direto na coluna `metadata` da tabela `agent_conversations.messages` como alternativa que não depende dessa integração.
 
 ### Persistência de conversas
 

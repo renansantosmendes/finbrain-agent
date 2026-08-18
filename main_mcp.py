@@ -86,6 +86,10 @@ async def main(url: str) -> None:
         await persistence.log_message(thread_id, "assistant", final_message.text)
         logger.info("main: run complete thread_id=%s", thread_id)
 
+    # Langfuse batches spans/usage/cost on a background thread; without this,
+    # the process can exit before that data ever reaches the Langfuse API.
+    langfuse.flush()
+
 
 if __name__ == "__main__":
     url = sys.argv[1] if len(sys.argv) > 1 else MCP_URL

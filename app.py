@@ -112,6 +112,7 @@ class AgentRuntime:
 
     def __init__(self) -> None:
         self.agent = None
+        self.langfuse = None
         self.langfuse_handler = None
         self._checkpointer_cm = None
 
@@ -119,9 +120,9 @@ class AgentRuntime:
         logger.info("startup: bootstrapping schema, loading prompt/tools/checkpointer")
         persistence.bootstrap_schema()
 
-        langfuse = Langfuse()
+        self.langfuse = Langfuse()
         self.langfuse_handler = CallbackHandler()
-        system_prompt = langfuse.get_prompt("FINBRAIN_SYSTEM_PROMPT").compile()
+        system_prompt = self.langfuse.get_prompt("FINBRAIN_SYSTEM_PROMPT").compile()
 
         client = MultiServerMCPClient({
             "finbrain": {"transport": "streamable_http", "url": MCP_URL},
@@ -147,6 +148,8 @@ class AgentRuntime:
         logger.info("startup: agent ready")
 
     async def shutdown(self) -> None:
+        if self.langfuse is not None:
+            self.langfuse.flush()
         if self._checkpointer_cm is not None:
             await self._checkpointer_cm.__aexit__(None, None, None)
         logger.info("shutdown: complete")
@@ -212,6 +215,13 @@ async def chat(request: ChatRequest, rt: AgentRuntime = Depends(get_runtime)) ->
     except Exception:
         logger.exception("chat: agent invocation failed session_id=%s", session_id)
         raise HTTPException(status_code=500, detail="Agent invocation failed")
+    finally:
+        # Langfuse batches spans/usage/cost and ships them on a background
+        # thread; without an explicit flush, a serverless instance can freeze
+        # right after the response is sent and that data never leaves the
+        # process. Off the event loop since flush() blocks on network I/O.
+        if rt.langfuse is not None:
+            await asyncio.to_thread(rt.langfuse.flush)
 
     reply = result["messages"][-1].text
 
