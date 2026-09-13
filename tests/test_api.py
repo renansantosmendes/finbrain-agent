@@ -6,6 +6,7 @@ The real agent, MCP tools and Neon connection are never touched here:
 - The TestClient is used WITHOUT the `with` context manager, so FastAPI's
   lifespan (which does real network calls on startup) never runs.
 """
+import logging
 import uuid
 from unittest.mock import AsyncMock, patch
 
@@ -19,6 +20,25 @@ from app import AgentRuntime, app, get_runtime
 class FakeMessage:
     def __init__(self, text: str):
         self.text = text
+
+
+class FakeHumanMessage:
+    type = "human"
+
+
+class FakeAIMessage:
+    type = "ai"
+
+    def __init__(self, tool_calls=None):
+        self.tool_calls = tool_calls or []
+
+
+class FakeToolMessage:
+    type = "tool"
+
+    def __init__(self, name: str, content: str):
+        self.name = name
+        self.content = content
 
 
 class FakeAgent:
@@ -151,3 +171,45 @@ def test_chat_logs_raw_command_text_not_the_expanded_prompt(client):
 
     user_call = mock_log.await_args_list[0]
     assert user_call.args == ("cmd-log-thread", "user", "/price PETR4")
+
+
+def test_chat_logs_which_command_was_selected(client, caplog):
+    test_client, _ = client
+    with caplog.at_level(logging.INFO, logger="finbrain"):
+        test_client.post("/chat", json={"message": "/price PETR4"})
+    assert "command=/price" in caplog.text
+
+
+def test_chat_logs_free_form_messages_as_such(client, caplog):
+    test_client, _ = client
+    with caplog.at_level(logging.INFO, logger="finbrain"):
+        test_client.post("/chat", json={"message": "qual o preço da PETR4?"})
+    assert "free-form message" in caplog.text
+
+
+def test_log_agent_activity_logs_tool_calls_and_results(caplog):
+    messages = [
+        FakeHumanMessage(),
+        FakeAIMessage(tool_calls=[{"name": "collect_yfinance_data", "args": {"ticker": "PETR4.SA"}}]),
+        FakeToolMessage("collect_yfinance_data", '{"current_price": 42.0}'),
+    ]
+    with caplog.at_level(logging.INFO, logger="finbrain"):
+        app_module._log_agent_activity("thread-x", messages)
+
+    assert "calling tool=collect_yfinance_data" in caplog.text
+    assert "tool_result tool=collect_yfinance_data" in caplog.text
+
+
+def test_log_agent_activity_ignores_earlier_turns(caplog):
+    messages = [
+        FakeHumanMessage(),
+        FakeAIMessage(tool_calls=[{"name": "old_tool", "args": {}}]),
+        FakeToolMessage("old_tool", "old result"),
+        FakeHumanMessage(),
+        FakeAIMessage(tool_calls=[{"name": "new_tool", "args": {}}]),
+    ]
+    with caplog.at_level(logging.INFO, logger="finbrain"):
+        app_module._log_agent_activity("thread-x", messages)
+
+    assert "new_tool" in caplog.text
+    assert "old_tool" not in caplog.text

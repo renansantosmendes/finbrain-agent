@@ -56,6 +56,33 @@ MODEL = "openai:gpt-5-nano"
 FALLBACK_MODEL = "openai:gpt-4o-mini"
 
 
+def _log_agent_activity(session_id: str, messages: list) -> None:
+    """Log the tool calls the agent made this turn: which tool, with which
+    args, and what it got back. `messages` is the full checkpointed history
+    (it accumulates across turns), so this only looks at what comes after the
+    last human message -- i.e. what happened in response to it.
+    """
+    last_human_idx = -1
+    for i, m in enumerate(messages):
+        if getattr(m, "type", None) == "human":
+            last_human_idx = i
+
+    for m in messages[last_human_idx + 1:]:
+        msg_type = getattr(m, "type", None)
+        if msg_type == "ai":
+            for tc in getattr(m, "tool_calls", None) or []:
+                logger.info(
+                    "agent: session_id=%s calling tool=%s args=%s",
+                    session_id, tc.get("name"), tc.get("args"),
+                )
+        elif msg_type == "tool":
+            preview = str(getattr(m, "content", ""))[:300]
+            logger.info(
+                "agent: session_id=%s tool_result tool=%s preview=%s",
+                session_id, getattr(m, "name", "?"), preview,
+            )
+
+
 def _on_tool_error(exc: Exception, request) -> str:
     """Turn a tool-execution exception into a message the model can react to.
 
@@ -203,12 +230,16 @@ async def chat(request: ChatRequest, rt: AgentRuntime = Depends(get_runtime)) ->
     await persistence.log_message(session_id, "user", request.message)
 
     resolved = commands.resolve(request.message)
-    if resolved is not None and resolved.direct_reply is not None:
-        # Known command with bad/missing args, an unknown command, or /ajuda:
-        # answered here directly, no agent/LLM call spent on it.
-        logger.info("chat: handled as command session_id=%s", session_id)
-        await persistence.log_message(session_id, "assistant", resolved.direct_reply)
-        return ChatResponse(session_id=session_id, reply=resolved.direct_reply)
+    if resolved is not None:
+        logger.info("chat: command=/%s session_id=%s", resolved.command_name, session_id)
+        if resolved.direct_reply is not None:
+            # Known command with bad/missing args, an unknown command, or
+            # /help: answered here directly, no agent/LLM call spent on it.
+            logger.info("chat: /%s handled directly, no agent call session_id=%s", resolved.command_name, session_id)
+            await persistence.log_message(session_id, "assistant", resolved.direct_reply)
+            return ChatResponse(session_id=session_id, reply=resolved.direct_reply)
+    else:
+        logger.info("chat: free-form message (no command) session_id=%s", session_id)
 
     agent_input = resolved.prompt_for_agent if resolved is not None else request.message
 
@@ -236,6 +267,8 @@ async def chat(request: ChatRequest, rt: AgentRuntime = Depends(get_runtime)) ->
         # process. Off the event loop since flush() blocks on network I/O.
         if rt.langfuse is not None:
             await asyncio.to_thread(rt.langfuse.flush)
+
+    _log_agent_activity(session_id, result["messages"])
 
     reply = result["messages"][-1].text
 

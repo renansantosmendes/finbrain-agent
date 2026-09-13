@@ -119,6 +119,10 @@ def _help_text() -> str:
 
 @dataclass(frozen=True)
 class ResolvedCommand:
+    command_name: str
+    """The command word as typed (lowercased, no leading `/`), for logging --
+    e.g. "price", "help", or an unrecognized name like "naoexiste"."""
+
     prompt_for_agent: Optional[str]
     """Set when the command should be forwarded to the agent as this prompt."""
 
@@ -141,11 +145,12 @@ def resolve(message: str) -> Optional[ResolvedCommand]:
     name = name.lower()
 
     if name == "help":
-        return ResolvedCommand(prompt_for_agent=None, direct_reply=_help_text())
+        return ResolvedCommand(command_name=name, prompt_for_agent=None, direct_reply=_help_text())
 
     spec = COMMANDS.get(name)
     if spec is None:
         return ResolvedCommand(
+            command_name=name,
             prompt_for_agent=None,
             direct_reply=f"Comando `/{name}` não reconhecido.\n\n{_help_text()}",
         )
@@ -153,6 +158,6 @@ def resolve(message: str) -> Optional[ResolvedCommand]:
     try:
         prompt = spec.build_prompt(rest)
     except ValueError as e:
-        return ResolvedCommand(prompt_for_agent=None, direct_reply=str(e))
+        return ResolvedCommand(command_name=name, prompt_for_agent=None, direct_reply=str(e))
 
-    return ResolvedCommand(prompt_for_agent=prompt, direct_reply=None)
+    return ResolvedCommand(command_name=name, prompt_for_agent=prompt, direct_reply=None)
