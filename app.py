@@ -47,6 +47,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langfuse.langchain import CallbackHandler
 from langfuse import Langfuse
 
+import commands
 import persistence
 from logging_config import logger
 
@@ -196,7 +197,20 @@ async def chat(request: ChatRequest, rt: AgentRuntime = Depends(get_runtime)) ->
     session_id = request.session_id or str(uuid.uuid4())
     logger.info("chat: request received session_id=%s message_len=%d", session_id, len(request.message))
 
+    # Log the raw text the user sent (e.g. "/preco PETR4"), not the expanded
+    # prompt below -- that's what an audit trail of "what did they type"
+    # should preserve.
     await persistence.log_message(session_id, "user", request.message)
+
+    resolved = commands.resolve(request.message)
+    if resolved is not None and resolved.direct_reply is not None:
+        # Known command with bad/missing args, an unknown command, or /ajuda:
+        # answered here directly, no agent/LLM call spent on it.
+        logger.info("chat: handled as command session_id=%s", session_id)
+        await persistence.log_message(session_id, "assistant", resolved.direct_reply)
+        return ChatResponse(session_id=session_id, reply=resolved.direct_reply)
+
+    agent_input = resolved.prompt_for_agent if resolved is not None else request.message
 
     config = {
         "configurable": {"thread_id": session_id},
@@ -209,7 +223,7 @@ async def chat(request: ChatRequest, rt: AgentRuntime = Depends(get_runtime)) ->
 
     try:
         result = await rt.agent.ainvoke(
-            {"messages": [{"role": "user", "content": request.message}]},
+            {"messages": [{"role": "user", "content": agent_input}]},
             config,
         )
     except Exception:

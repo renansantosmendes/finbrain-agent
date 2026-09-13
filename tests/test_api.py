@@ -113,3 +113,41 @@ def test_chat_returns_503_when_agent_not_ready():
         assert resp.status_code == 503
     finally:
         app.dependency_overrides.clear()
+
+
+def test_chat_expands_a_known_command_before_calling_the_agent(client, fake_runtime):
+    test_client, _ = client
+    resp = test_client.post("/chat", json={"message": "/price PETR4", "session_id": "cmd-thread"})
+
+    assert resp.status_code == 200
+    assert resp.json()["reply"] == "mocked reply"  # came from the agent, not a direct reply
+
+    inputs, _ = fake_runtime.agent.received_calls[0]
+    assert "PETR4" in inputs["messages"][0]["content"]
+    assert inputs["messages"][0]["content"] != "/price PETR4"  # expanded, not passed through raw
+
+
+def test_chat_help_command_never_calls_the_agent(client, fake_runtime):
+    test_client, _ = client
+    resp = test_client.post("/chat", json={"message": "/help"})
+
+    assert resp.status_code == 200
+    assert "/price" in resp.json()["reply"]
+    assert fake_runtime.agent.received_calls == []
+
+
+def test_chat_unknown_command_never_calls_the_agent(client, fake_runtime):
+    test_client, _ = client
+    resp = test_client.post("/chat", json={"message": "/naoexiste"})
+
+    assert resp.status_code == 200
+    assert "não reconhecido" in resp.json()["reply"]
+    assert fake_runtime.agent.received_calls == []
+
+
+def test_chat_logs_raw_command_text_not_the_expanded_prompt(client):
+    test_client, mock_log = client
+    test_client.post("/chat", json={"message": "/price PETR4", "session_id": "cmd-log-thread"})
+
+    user_call = mock_log.await_args_list[0]
+    assert user_call.args == ("cmd-log-thread", "user", "/price PETR4")

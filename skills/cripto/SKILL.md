@@ -1,30 +1,22 @@
 ---
-name: technical-analysis
-description: Realiza análise técnica de gráfico (médias móveis, RSI, MACD) para identificar momentum, sobrecompra/sobrevenda e cruzamentos de tendência.
+name: cripto
+description: Use esta skill para preços, candles ou order book de criptomoedas (Bitcoin, Ethereum, etc.) em exchanges. Ative para pedidos como "qual o preço do Bitcoin", "mostre o histórico do Ethereum", ou "qual o spread do BTC na Binance".
 ---
-# Skill de Análise Técnica
 
-## Quando Usar
-- Sempre que o usuário pedir análise de "gráfico", "tendência técnica", "RSI", "MACD", "média móvel", "momento de compra/venda" ou "sinal técnico" de uma ação.
-- Não usar para pedidos de indicadores de balanço/fundamentos (isso é `fundamental-analysis`) nem para cotação simples do dia (isso é `stock-analysis`).
+# Criptomoedas (ccxt)
 
-## Protocolo de Execução
-1. **Identificação do Ticker:** Identifique o ticker mencionado, adicionando `.SA` se for ação brasileira e o sufixo não tiver sido informado.
-2. **Coleta de Dados:** Chame `collect_technical_indicators` passando o ticker (use período padrão de 3 meses, a menos que o usuário peça outro horizonte).
-3. **Análise de Regras:**
-   - **Médias Móveis:** Se `moving_average_9` > `moving_average_21`, sinalize possível tendência de curto prazo de alta (cruzamento otimista); se for o inverso, tendência de baixa.
-   - **RSI:** Acima de 70 indica sobrecompra (risco de correção); abaixo de 30 indica sobrevenda (possível oportunidade); entre 30 e 70 é neutro.
-   - **MACD:** Se `macd` > `macd_signal`, momentum comprador; se `macd` < `macd_signal`, momentum vendedor.
-4. **Alerta de Isenção:** Você DEVE incluir o aviso legal de que isso não é recomendação oficial de investimento e que indicadores técnicos não garantem resultados futuros.
+Esta skill usa a biblioteca `ccxt` para buscar dados reais de criptomoedas em exchanges.
 
-## Formato de Resposta Obrigatório
-### 📊 Análise Técnica: [Inserir Ticker]
-* **Preço Atual:** [preço]
-* **Médias Móveis (9/21/50):** [valores]
-* **RSI (14):** [valor] — [Sobrecomprado / Sobrevendido / Neutro]
-* **MACD:** [valor] vs Sinal [valor] — [Momentum Comprador / Vendedor]
+## Quando usar
+- Qualquer pergunta sobre preço, histórico ou order book de criptomoedas.
 
-### 🧠 Avaliação da IA
-[Parágrafo interpretando os sinais técnicos combinados, com base nas regras do protocolo]
+## Ferramentas disponíveis
+- `get_crypto_price(exchange_name, symbol)`: preço atual, máxima/mínima 24h, variação.
+- `get_crypto_ohlcv(exchange_name, symbol, timeframe, limit)`: histórico de candles.
+- `get_crypto_order_book(exchange_name, symbol, limit)`: melhores preços de compra/venda e spread.
+- `list_available_exchanges()`: lista de exchanges suportadas, caso o usuário pergunte quais existem.
 
-> **Aviso:** Esta análise é automatizada, baseada em dados públicos e indicadores técnicos passados, que não garantem resultados futuros. Não constitui recomendação de compra ou venda de ativos.
+## Como usar
+1. Se o usuário não especificar a exchange, use "binance" como padrão -- NÃO pergunte, apenas prossiga.
+2. Símbolos seguem o formato "BASE/QUOTE" em maiúsculas (ex: BTC/USDT, ETH/USD).
+3. Se o usuário usar o nome comum da moeda (ex: "Bitcoin"), converta para o símbolo (BTC/USDT).

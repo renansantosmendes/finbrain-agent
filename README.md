@@ -71,13 +71,14 @@ Ver [persistence.py](persistence.py) para os detalhes de conexão (schema via `s
 finbrain-agent/
 ├── main_mcp.py           # script de demonstração: roda o agente uma vez via CLI
 ├── app.py                # API FastAPI (rota /chat) — também o entrypoint que o Vercel detecta
+├── commands.py           # comandos /price, /technical etc. -- atalhos determinísticos pras skills
 ├── vercel.json            # config da função serverless (maxDuration, excludeFiles)
 ├── persistence.py        # schema Postgres (Neon), checkpointer do LangGraph, log de mensagens
 ├── logging_config.py     # configuração do logger "finbrain"
 ├── requirements.txt      # dependências de produção (também usado pelo Vercel)
 ├── requirements-dev.txt  # + pytest, para CI/dev local
 ├── pytest.ini             # config dos testes
-├── tests/                 # testes unitários (persistence.py e app.py)
+├── tests/                 # testes unitários (persistence.py, app.py e commands.py)
 ├── .github/workflows/ci.yml  # roda pytest em PRs e pushes na main
 ├── .env                   # chaves de API (não versionado)
 └── skills/                # skills em Markdown que orientam o agente
@@ -224,6 +225,24 @@ POST /chat
 ```
 
 Reenviar o mesmo `session_id` em requisições seguintes mantém o histórico da conversa — a memória vive no Postgres (ver acima), não em RAM, então sobrevive a reinícios do processo.
+
+#### Comandos (`/comando`)
+
+Além de mensagem livre (roteada pelo LLM via descrição das skills), o `/chat` aceita comandos determinísticos definidos em [commands.py](commands.py) — resolvidos **antes** do agente rodar, então um comando inválido/desconhecido responde na hora, sem gastar chamada de LLM:
+
+| Comando | Skill acionada |
+|---|---|
+| `/price <ticker>` | `stock-analysis` |
+| `/fundamentals <ticker>` | `fundamental-analysis` |
+| `/technical <ticker>` | `technical-analysis` |
+| `/compare <t1,t2,...>` | `asset-comparison` |
+| `/simulate <ticker> [days]` | `market-scenario-simulation` |
+| `/crypto <símbolo>` | `cripto` |
+| `/brazil <indicador>` | `macro-brasil` |
+| `/global <indicador> <país(es)>` | `macro-global` |
+| `/help` | lista os comandos acima (não chama o agente) |
+
+Um comando é traduzido para a instrução em linguagem natural que aciona a skill certa (ex.: `/price PETR4` → "Qual o preço atual e o histórico recente da ação PETR4?") antes de ser passado ao agente; o texto original do comando (não o traduzido) é o que fica gravado no log de mensagens, para auditoria fiel do que o usuário digitou.
 
 ### Testes
 
