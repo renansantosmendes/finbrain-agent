@@ -28,7 +28,7 @@ if sys.platform == "win32":
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from deepagents import create_deep_agent
@@ -49,6 +49,7 @@ from langfuse import Langfuse
 
 import commands
 import persistence
+import telegram
 from logging_config import logger
 
 MCP_URL = "https://finbrain-mcp.vercel.app/mcp"
@@ -215,21 +216,17 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest, rt: AgentRuntime = Depends(get_runtime)) -> ChatResponse:
-    if rt.agent is None:
-        logger.error("chat: rejected, agent not ready")
-        raise HTTPException(status_code=503, detail="Agent not ready")
-
-    session_id = request.session_id or str(uuid.uuid4())
-    logger.info("chat: request received session_id=%s message_len=%d", session_id, len(request.message))
-
+async def _run_turn(rt: AgentRuntime, session_id: str, message: str, tags: list[str]) -> str:
+    """Resolve a slash command or invoke the agent, logging the turn either
+    way. Shared by /chat and the Telegram webhook so both channels share one
+    conversation history, one command set, and one error/logging behavior.
+    """
     # Log the raw text the user sent (e.g. "/preco PETR4"), not the expanded
     # prompt below -- that's what an audit trail of "what did they type"
     # should preserve.
-    await persistence.log_message(session_id, "user", request.message)
+    await persistence.log_message(session_id, "user", message)
 
-    resolved = commands.resolve(request.message)
+    resolved = commands.resolve(message)
     if resolved is not None:
         logger.info("chat: command=/%s session_id=%s", resolved.command_name, session_id)
         if resolved.direct_reply is not None:
@@ -237,18 +234,18 @@ async def chat(request: ChatRequest, rt: AgentRuntime = Depends(get_runtime)) ->
             # /help: answered here directly, no agent/LLM call spent on it.
             logger.info("chat: /%s handled directly, no agent call session_id=%s", resolved.command_name, session_id)
             await persistence.log_message(session_id, "assistant", resolved.direct_reply)
-            return ChatResponse(session_id=session_id, reply=resolved.direct_reply)
+            return resolved.direct_reply
     else:
         logger.info("chat: free-form message (no command) session_id=%s", session_id)
 
-    agent_input = resolved.prompt_for_agent if resolved is not None else request.message
+    agent_input = resolved.prompt_for_agent if resolved is not None else message
 
     config = {
         "configurable": {"thread_id": session_id},
         "callbacks": [rt.langfuse_handler] if rt.langfuse_handler else [],
         "metadata": {
             "langfuse_session_id": session_id,
-            "langfuse_tags": ["api", "financial-agent"],
+            "langfuse_tags": tags,
         },
     }
 
@@ -259,7 +256,7 @@ async def chat(request: ChatRequest, rt: AgentRuntime = Depends(get_runtime)) ->
         )
     except Exception:
         logger.exception("chat: agent invocation failed session_id=%s", session_id)
-        raise HTTPException(status_code=500, detail="Agent invocation failed")
+        raise
     finally:
         # Langfuse batches spans/usage/cost and ships them on a background
         # thread; without an explicit flush, a serverless instance can freeze
@@ -275,7 +272,64 @@ async def chat(request: ChatRequest, rt: AgentRuntime = Depends(get_runtime)) ->
     await persistence.log_message(session_id, "assistant", reply)
     logger.info("chat: request completed session_id=%s reply_len=%d", session_id, len(reply))
 
+    return reply
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest, rt: AgentRuntime = Depends(get_runtime)) -> ChatResponse:
+    if rt.agent is None:
+        logger.error("chat: rejected, agent not ready")
+        raise HTTPException(status_code=503, detail="Agent not ready")
+
+    session_id = request.session_id or str(uuid.uuid4())
+    logger.info("chat: request received session_id=%s message_len=%d", session_id, len(request.message))
+
+    try:
+        reply = await _run_turn(rt, session_id, request.message, tags=["api", "financial-agent"])
+    except Exception:
+        raise HTTPException(status_code=500, detail="Agent invocation failed")
+
     return ChatResponse(session_id=session_id, reply=reply)
+
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request, rt: AgentRuntime = Depends(get_runtime)) -> dict:
+    """Receives Telegram updates and replies via the Bot API (see telegram.py).
+
+    Always returns 200 -- Telegram retries the webhook on non-2xx responses,
+    and every failure mode here (bad secret, agent not ready, malformed
+    update, agent error) is either unrecoverable by a retry or already
+    reported to the user via a chat message, so a retry storm would only add
+    noise.
+    """
+    if telegram.TELEGRAM_WEBHOOK_SECRET:
+        secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+        if secret != telegram.TELEGRAM_WEBHOOK_SECRET:
+            logger.warning("telegram: rejected webhook call with bad/missing secret token")
+            return {"ok": False}
+
+    update = await request.json()
+    incoming = telegram.extract_incoming_text(update)
+    if incoming is None:
+        logger.info("telegram: ignoring update with no text message")
+        return {"ok": True}
+
+    chat_id, text = incoming
+    session_id = f"telegram-{chat_id}"
+    logger.info("telegram: update received chat_id=%s text_len=%d", chat_id, len(text))
+
+    if rt.agent is None:
+        logger.error("telegram: rejected, agent not ready chat_id=%s", chat_id)
+        await telegram.send_message(chat_id, "O agente ainda está iniciando, tente novamente em instantes.")
+        return {"ok": True}
+
+    try:
+        reply = await _run_turn(rt, session_id, text, tags=["telegram", "financial-agent"])
+    except Exception:
+        reply = "Desculpe, ocorreu um erro ao processar sua mensagem. Tente novamente."
+
+    await telegram.send_message(chat_id, reply)
+    return {"ok": True}
 
 
 if __name__ == "__main__":

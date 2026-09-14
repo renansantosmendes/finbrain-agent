@@ -24,6 +24,7 @@ Voltar para o [README principal](../README.md).
 | [`technical-analysis`](#-technical-analysis) | Ações | [technical_analysis/](technical_analysis/SKILL.md) |
 | [`asset-comparison`](#️-asset-comparison) | Ações | [asset_comparison/](asset_comparison/SKILL.md) |
 | [`market-scenario-simulation`](#-market-scenario-simulation) | Ações | [market_scenario_simulation/](market_scenario_simulation/SKILL.md) |
+| [`buy-sell-recommendation`](#-buy-sell-recommendation) | Ações | [buy_sell_recommendation/](buy_sell_recommendation/SKILL.md) |
 | [`cripto`](#-cripto) | Criptomoedas | [cripto/](cripto/SKILL.md) |
 | [`macro-brasil`](#-macro-brasil) | Macro Brasil | [macro_brasil/](macro_brasil/SKILL.md) |
 | [`macro-global`](#-macro-global) | Macro Global | [macro_global/](macro_global/SKILL.md) |
@@ -111,6 +112,28 @@ Voltar para o [README principal](../README.md).
   - `mode="simulate"` com parâmetros GARCH padrão da ferramenta, salvo se o usuário fornecer retornos históricos explícitos (`mode="fit_and_simulate"`).
   - Agregar os valores finais de todas as séries: P10 = cenário pessimista, mediana = cenário base, P90 = cenário otimista.
 - **Saída:** bloco `🎲 Simulação de Cenários` com tabela de 3 cenários (preço e variação %), `🧠 Avaliação da IA` e aviso reforçando que é uma simulação estatística, não uma previsão garantida.
+
+---
+
+## 🧭 `buy-sell-recommendation`
+
+**Sugestão de compra/manutenção/venda cruzando histórico, simulação futura (GARCH) e detecção de outliers.**
+
+- **Gatilhos:** "devo comprar ou vender X", "vale a pena comprar essa ação agora", "me dá um sinal de compra/venda", "essa ação está cara ou é hora de vender".
+- **Não usar para:** apenas cotação/histórico (`stock-analysis`), apenas fundamentos (`fundamental-analysis`), apenas leitura de gráfico (`technical-analysis`) ou apenas projeção de cenários sem pedido de decisão (`market-scenario-simulation`) — esta é a única skill que combina as três fontes para chegar a um veredito.
+- **Ferramentas obrigatórias (nesta ordem):**
+
+  | Ferramenta | Papel |
+  |---|---|
+  | `collect_yfinance_data(ticker, period="6mo", interval="1d")` | Preço atual e série de preços históricos |
+  | `detect_price_outliers(ticker, prices, method="zscore", threshold=2.5)` | Identifica movimentos anômalos na série histórica |
+  | `generate_synthetic_stock_series_garch_arch(ticker, start_date, n_days, n_series, initial_price, ...)` | Simula caminhos de preço futuros (GARCH/Monte Carlo) |
+
+  Ferramentas opcionais, a critério do agente, quando o sinal está no limite ou o usuário pede confirmação: `collect_technical_indicators`, `collect_fundamental_indicators`.
+- **Regras de interpretação:**
+  - Sinal baseado na variação da mediana simulada (P50) vs. preço atual: `> +5%` → 🟢 COMPRA · entre `-5%` e `+5%` → ⚪ MANTER · `< -5%` → 🔴 VENDA.
+  - Confiança reduzida se: outlier nos últimos 5 pregões, série com >10% de outliers, ou spread P10–P90 ≥ 15% do preço atual. O sinal nunca se inverte por causa disso — só é qualificado como menos confiável.
+- **Saída:** bloco `🧭 Recomendação` com preço atual, sinal + confiança, tabela de cenários (P10/P50/P90) e outliers encontrados, seguido de `🧠 Avaliação da IA` e do aviso reforçando que é uma simulação estatística e não recomendação oficial de investimento.
 
 ---
 

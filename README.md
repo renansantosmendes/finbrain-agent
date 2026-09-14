@@ -74,8 +74,9 @@ Ver [persistence.py](persistence.py) para os detalhes de conexão (schema via `s
 ```
 finbrain-agent/
 ├── main_mcp.py           # script de demonstração: roda o agente uma vez via CLI
-├── app.py                # API FastAPI (rota /chat) — também o entrypoint que o Vercel detecta
+├── app.py                # API FastAPI (rotas /chat e /telegram/webhook) — também o entrypoint que o Vercel detecta
 ├── commands.py           # comandos /price, /technical etc. -- atalhos determinísticos pras skills
+├── telegram.py           # cliente mínimo da Bot API do Telegram (sendMessage, parse do update)
 ├── vercel.json            # config da função serverless (maxDuration, excludeFiles)
 ├── persistence.py        # schema Postgres (Neon), checkpointer do LangGraph, log de mensagens
 ├── logging_config.py     # configuração do logger "finbrain"
@@ -91,6 +92,7 @@ finbrain-agent/
     ├── technical_analysis/
     ├── asset_comparison/
     ├── market_scenario_simulation/
+    ├── buy_sell_recommendation/
     ├── cripto/
     ├── macro_brasil/
     └── macro_global/
@@ -100,7 +102,7 @@ finbrain-agent/
 
 ## Skills disponíveis
 
-Sete skills cobrem quatro domínios. A documentação detalhada de cada uma está em [skills/README.md](skills/README.md).
+Oito skills cobrem quatro domínios. A documentação detalhada de cada uma está em [skills/README.md](skills/README.md).
 
 ### 📈 Ações
 
@@ -111,6 +113,7 @@ Sete skills cobrem quatro domínios. A documentação detalhada de cada uma est�
 | [`technical-analysis`](skills/technical_analysis/SKILL.md) | Gráfico, tendência, RSI, MACD, médias móveis | `collect_technical_indicators` |
 | [`asset-comparison`](skills/asset_comparison/SKILL.md) | Dois ou mais tickers na mesma pergunta | `compare_assets` |
 | [`market-scenario-simulation`](skills/market_scenario_simulation/SKILL.md) | Projeção de cenários futuros, simulação de mercado, Monte Carlo | `generate_synthetic_stock_series_garch_arch` |
+| [`buy-sell-recommendation`](skills/buy_sell_recommendation/SKILL.md) | "Devo comprar ou vender?", sinal de compra/venda para um ticker | `collect_yfinance_data`, `detect_price_outliers`, `generate_synthetic_stock_series_garch_arch` |
 
 ### ₿ Criptomoedas
 
@@ -152,7 +155,7 @@ A API (`app.py`) está pronta para deploy como função serverless Python no Ver
 ### Passos
 
 1. Importe o repositório no [dashboard do Vercel](https://vercel.com/new) (framework preset: "Other").
-2. Configure as variáveis de ambiente do projeto (Settings → Environment Variables) com os mesmos valores do `.env` local: `OPENAI_API_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`, `NEON_DATABASE_URL`.
+2. Configure as variáveis de ambiente do projeto (Settings → Environment Variables) com os mesmos valores do `.env` local: `OPENAI_API_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`, `NEON_DATABASE_URL` e, se for usar o bot do Telegram, `TELEGRAM_BOT_TOKEN` e `TELEGRAM_WEBHOOK_SECRET` (ver **Bot do Telegram** abaixo).
 3. Deploy. A cada push, o Vercel builda e publica; o CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) roda os testes antes disso no PR.
 
 ### Limitações conhecidas em produção serverless
@@ -186,6 +189,9 @@ LANGFUSE_SECRET_KEY=...
 LANGFUSE_HOST=https://cloud.langfuse.com   # ou https://us.cloud.langfuse.com, conforme a região do projeto
 
 NEON_DATABASE_URL=postgresql://...          # usado para persistência de conversas
+
+TELEGRAM_BOT_TOKEN=...                      # opcional — só necessário para o bot do Telegram, ver "Bot do Telegram"
+TELEGRAM_WEBHOOK_SECRET=...                 # opcional — recomendado junto com o token acima
 ```
 
 O Langfuse é obrigatório na configuração atual, porque o prompt de sistema é carregado de lá. `NEON_DATABASE_URL` é obrigatório para rodar `app.py` (API) e para as chamadas do `main_mcp.py` que usam checkpointer — veja **Persistência de conversas** acima.
@@ -247,6 +253,30 @@ Além de mensagem livre (roteada pelo LLM via descrição das skills), o `/chat`
 | `/help` | lista os comandos acima (não chama o agente) |
 
 Um comando é traduzido para a instrução em linguagem natural que aciona a skill certa (ex.: `/price PETR4` → "Qual o preço atual e o histórico recente da ação PETR4?") antes de ser passado ao agente; o texto original do comando (não o traduzido) é o que fica gravado no log de mensagens, para auditoria fiel do que o usuário digitou.
+
+### Bot do Telegram
+
+`app.py` também expõe `POST /telegram/webhook`, que recebe updates do Telegram e responde chamando a Bot API diretamente (ver [telegram.py](telegram.py)). É um **webhook**, não *polling*: como a API roda como função serverless (sem processo de longa duração para dar `getUpdates` em loop), o Telegram é quem empurra cada mensagem para essa rota.
+
+Cada chat do Telegram vira uma sessão própria (`session_id = "telegram-<chat_id>"`), com o mesmo histórico persistido no Postgres e os mesmos comandos (`/price`, `/simulate`, etc.) descritos acima — o Telegram já trata `/comando` nativamente.
+
+**Configuração:**
+
+1. Crie o bot com o [@BotFather](https://t.me/BotFather) (`/newbot`) e copie o token que ele devolve.
+2. Defina `TELEGRAM_BOT_TOKEN` (o token) e `TELEGRAM_WEBHOOK_SECRET` (qualquer string aleatória — usada para validar que a chamada em `/telegram/webhook` realmente veio do Telegram, via header `X-Telegram-Bot-Api-Secret-Token`) tanto no `.env` local quanto nas variáveis de ambiente do projeto no Vercel.
+3. Depois do deploy, registre o webhook **uma vez** apontando para a URL pública do seu projeto:
+
+   ```bash
+   curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
+     -d "url=https://<seu-projeto>.vercel.app/telegram/webhook" \
+     -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>"
+   ```
+
+4. Para conferir o status do webhook a qualquer momento: `https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getWebhookInfo`.
+
+`TELEGRAM_WEBHOOK_SECRET` é opcional, mas sem ele qualquer requisição para `/telegram/webhook` é aceita como se fosse do Telegram — defina-o sempre que a rota estiver publicamente acessível (ou seja, sempre, em produção).
+
+> As respostas do agente usam Markdown estilo GitHub (tabelas, `**negrito**`, `###` títulos) — o bot envia como texto puro, então esses símbolos aparecem literalmente na mensagem em vez de formatados. É uma limitação conhecida do modo `Markdown` legado do Telegram (que rejeita `**`/tabelas com erro 400); não afeta a resposta em si, só a formatação visual.
 
 ### Testes
 
