@@ -156,6 +156,7 @@ class AgentRuntime:
     async def startup(self) -> None:
         logger.info("startup: bootstrapping schema, loading prompt/tools/checkpointer")
         persistence.bootstrap_schema()
+        await persistence.init_pool()
 
         self.langfuse = Langfuse()
         self.langfuse_handler = CallbackHandler()
@@ -220,6 +221,7 @@ class AgentRuntime:
             self.langfuse.flush()
         if self._checkpointer_cm is not None:
             await self._checkpointer_cm.__aexit__(None, None, None)
+        await persistence.close_pool()
         logger.info("shutdown: complete")
 
 
@@ -260,18 +262,15 @@ async def _run_turn(rt: AgentRuntime, session_id: str, message: str, tags: list[
     way. Shared by /chat and the Telegram webhook so both channels share one
     conversation history, one command set, and one error/logging behavior.
     """
-    # Log the raw text the user sent (e.g. "/preco PETR4"), not the expanded
-    # prompt below -- that's what an audit trail of "what did they type"
-    # should preserve.
-    await persistence.log_message(session_id, "user", message)
-
     resolved = commands.resolve(message)
     if resolved is not None:
         logger.info("chat: command=/%s session_id=%s", resolved.command_name, session_id)
         if resolved.direct_reply is not None:
             # Known command with bad/missing args, an unknown command, or
-            # /help: answered here directly, no agent/LLM call spent on it.
+            # /help: answered here directly, no agent/LLM call spent on it --
+            # nothing to overlap the log write with, so just await it.
             logger.info("chat: /%s handled directly, no agent call session_id=%s", resolved.command_name, session_id)
+            await persistence.log_message(session_id, "user", message)
             await persistence.log_message(session_id, "assistant", resolved.direct_reply)
             return resolved.direct_reply
     else:
@@ -294,6 +293,22 @@ async def _run_turn(rt: AgentRuntime, session_id: str, message: str, tags: list[
             config,
         )
 
+    # Logging the raw text the user sent (e.g. "/preco PETR4", not the
+    # expanded prompt above) doesn't need to finish before the agent starts
+    # working -- the agent call takes far longer, so run the log write and
+    # the invocation concurrently instead of paying the log write's own
+    # Postgres connection latency serially before the agent even begins. A
+    # failure here is reported but must not fail the turn or get confused
+    # with the checkpointer retry below (log_message uses its own,
+    # unrelated connection) -- so it's swallowed after logging.
+    async def _log_user_message():
+        try:
+            await persistence.log_message(session_id, "user", message)
+        except Exception:
+            logger.exception("chat: failed to log user message session_id=%s", session_id)
+
+    log_task = asyncio.create_task(_log_user_message())
+
     try:
         try:
             result = await _invoke()
@@ -308,6 +323,11 @@ async def _run_turn(rt: AgentRuntime, session_id: str, message: str, tags: list[
         logger.exception("chat: agent invocation failed session_id=%s", session_id)
         raise
     finally:
+        # Awaited here (not fire-and-forget) for the same reason as the
+        # Langfuse flush below: a serverless instance can freeze right after
+        # the response is sent, so anything that must land has to complete
+        # before this function returns.
+        await log_task
         # Langfuse batches spans/usage/cost and ships them on a background
         # thread; without an explicit flush, a serverless instance can freeze
         # right after the response is sent and that data never leaves the
@@ -375,11 +395,15 @@ async def analyze_invoices(
     session_id = session_id or str(uuid.uuid4())
     logger.info("invoices: request received session_id=%s n_files=%d", session_id, len(files))
 
-    extractions = [
-        invoices.extract_text(await f.read(), f.filename or "arquivo.pdf")
-        for f in files
-    ]
-    invoices.set_current_invoices(extractions)
+    file_payloads = [(await f.read(), f.filename or "arquivo.pdf") for f in files]
+    # extract_text is CPU-bound (PDF parsing) -- off the event loop so it
+    # doesn't block other concurrent requests on the same warm instance, and
+    # in a thread per file so multiple PDFs parse concurrently too.
+    extractions = await asyncio.gather(*(
+        asyncio.to_thread(invoices.extract_text, content, filename)
+        for content, filename in file_payloads
+    ))
+    invoices.set_current_invoices(list(extractions))
 
     try:
         try:
@@ -473,7 +497,8 @@ async def _handle_telegram_document(rt: AgentRuntime, chat_id: int, user_id: int
         return
 
     logger.info("telegram: document received chat_id=%s filename=%s size=%d", chat_id, filename, len(content))
-    invoices.set_current_invoices([invoices.extract_text(content, filename)])
+    extraction = await asyncio.to_thread(invoices.extract_text, content, filename)
+    invoices.set_current_invoices([extraction])
 
     message = caption.strip() or (
         "Analise os gastos nesta fatura de cartão de crédito e me dê insights "

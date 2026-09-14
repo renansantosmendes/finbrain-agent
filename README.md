@@ -174,7 +174,7 @@ A API (`app.py`) está pronta para deploy como função serverless Python no Ver
 - **Cold start:** a primeira requisição após um cold start busca o prompt do Langfuse e as tools do MCP de novo, além de abrir a conexão do checkpointer no endpoint *unpooled* do Neon (mais lenta que a poolada — ver [persistence.py](persistence.py) sobre por que não dá pra usar o pooler aqui). Isso soma alguns segundos a dezenas de segundos antes mesmo do agente começar a responder. O histórico de conversa em si não é afetado (fica no Postgres, ver **Persistência de conversas** acima).
 - **Conexão do checkpointer caindo em instância "morna":** como essa conexão fica aberta e é reaproveitada entre requisições de uma mesma instância (ver ponto acima), o Neon pode fechá-la por ociosidade entre uma chamada e outra — o sintoma é `psycopg.OperationalError: the connection is closed` nos logs, e um 500 em `/chat`/`/telegram/webhook`. `_run_turn` (em `app.py`) detecta esse erro, reabre a conexão (`AgentRuntime.reconnect_checkpointer`) e tenta a chamada de novo automaticamente — só falha de fato se a reconexão também não resolver.
 - **Timeout:** se a função for morta por exceder `maxDuration`, o log da execução pode não aparecer no Runtime Logs (o processo é encerrado no meio, sem tempo de flush) — se isso acontecer, cheque a aba **Observability/Logs** do dashboard (não só o tail ao vivo) e considere aumentar `maxDuration` (dentro do teto do plano) antes de investigar mais fundo.
-- **Tamanho do pacote:** as dependências (`pandas`, `langchain`, `psycopg[binary]`, etc.) são razoáveis, mas vale observar o build do Vercel na primeira tentativa por limites de tamanho de função.
+- **Tamanho do pacote:** as dependências pesadas (`yfinance`, `pandas`, `ccxt`, `wbdata`, `python-bcb`) vivem no `finbrain-mcp`, não neste repo — foi assim, aliás, que um outage por `No space left on device` no `/tmp` do Vercel (dependências instaladas em runtime) foi resolvido. Aqui as dependências (`langchain`, `psycopg[binary]`, etc.) são razoáveis, mas vale observar o build do Vercel na primeira tentativa por limites de tamanho de função.
 
 ---
 
@@ -370,11 +370,6 @@ Boas práticas observadas nas skills atuais:
 | `deepagents` | Orquestração do agente e carregamento das skills |
 | `langchain-mcp-adapters` | Cliente MCP (`streamable_http`) |
 | `langfuse` | Observabilidade e versionamento do system prompt |
-| `yfinance` | Dados de ações |
-| `ccxt` | Dados de criptomoedas |
-| `python-bcb` | Séries do Banco Central do Brasil |
-| `wbdata` | Indicadores do Banco Mundial |
-| `arch` | Modelagem GARCH para simulação de cenários (lado do MCP) |
 | `fastapi` / `uvicorn` | API HTTP do agente (`app.py`) |
 | `langgraph-checkpoint-postgres` / `psycopg` | Persistência de conversas no Neon (`persistence.py`) |
 | `pytest` / `pytest-asyncio` | Testes unitários |

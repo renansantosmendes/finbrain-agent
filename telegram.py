@@ -19,6 +19,13 @@ _API_BASE = "https://api.telegram.org"
 # rather than let sendMessage fail outright on a long agent reply.
 _MAX_MESSAGE_LENGTH = 4096
 
+# Module-level and reused across calls (instead of a fresh client per call)
+# so consecutive Telegram API calls in the same turn -- getFile + file
+# download + sendMessage, up to 3 round trips for a document message --
+# reuse one TLS connection instead of paying a new handshake each time.
+# httpx.AsyncClient is safe to share across concurrent asyncio tasks.
+_client = httpx.AsyncClient(timeout=20.0)
+
 
 def is_configured() -> bool:
     return bool(TELEGRAM_BOT_TOKEN)
@@ -86,17 +93,16 @@ async def download_file(file_id: str) -> bytes | None:
         return None
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.get(
-                f"{_API_BASE}/bot{TELEGRAM_BOT_TOKEN}/getFile",
-                params={"file_id": file_id},
-            )
-            resp.raise_for_status()
-            file_path = resp.json()["result"]["file_path"]
+        resp = await _client.get(
+            f"{_API_BASE}/bot{TELEGRAM_BOT_TOKEN}/getFile",
+            params={"file_id": file_id},
+        )
+        resp.raise_for_status()
+        file_path = resp.json()["result"]["file_path"]
 
-            file_resp = await client.get(f"{_API_BASE}/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}")
-            file_resp.raise_for_status()
-            return file_resp.content
+        file_resp = await _client.get(f"{_API_BASE}/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}")
+        file_resp.raise_for_status()
+        return file_resp.content
     except (httpx.HTTPError, KeyError, ValueError):
         logger.exception("telegram: failed to download file_id=%s", file_id)
         return None
@@ -119,8 +125,7 @@ async def send_message(chat_id: int, text: str) -> None:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(url, json=payload)
+        response = await _client.post(url, json=payload)
         if response.status_code != 200:
             logger.error(
                 "telegram: sendMessage failed chat_id=%s status=%s body=%s",

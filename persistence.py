@@ -12,10 +12,19 @@ from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 import psycopg
 from psycopg.types.json import Jsonb
+from psycopg_pool import AsyncConnectionPool
 
 from logging_config import logger
 
 SCHEMA_NAME = "agent_conversations"
+
+# Reused across requests on a warm instance so log_message doesn't pay a
+# fresh TCP+TLS+auth handshake (against Neon's pooler) on every call -- see
+# init_pool()/close_pool(), called from AgentRuntime.startup()/shutdown() in
+# app.py. None until init_pool() runs; log_message falls back to a one-off
+# connection if it's ever called before that (e.g. bootstrap ordering bugs),
+# so a pool issue degrades latency instead of breaking logging outright.
+_pool: AsyncConnectionPool | None = None
 
 
 def _with_schema_search_path(base_url: str, schema: str = SCHEMA_NAME) -> str:
@@ -75,14 +84,39 @@ def bootstrap_schema() -> None:
     logger.info("persistence: schema '%s' and messages table ready", SCHEMA_NAME)
 
 
-async def log_message(thread_id: str, role: str, content: str, metadata: dict | None = None) -> None:
+async def init_pool() -> None:
+    """Open the log-write connection pool once per warm process. Small pool
+    (this table only ever sees single-row inserts, never a burst) that opens
+    eagerly so the first request doesn't pay connection setup on top of
+    everything else a cold start already does.
+    """
+    global _pool
     base_url = os.environ["NEON_DATABASE_URL"]
-    async with await psycopg.AsyncConnection.connect(base_url, autocommit=True) as conn:
-        await conn.execute(
-            f"""
-            INSERT INTO {SCHEMA_NAME}.messages (thread_id, role, content, metadata)
-            VALUES (%s, %s, %s, %s)
-            """,
-            (thread_id, role, content, Jsonb(metadata) if metadata is not None else None),
-        )
+    _pool = AsyncConnectionPool(base_url, min_size=1, max_size=5, kwargs={"autocommit": True}, open=False)
+    await _pool.open(wait=True)
+    logger.info("persistence: log-write connection pool opened")
+
+
+async def close_pool() -> None:
+    global _pool
+    if _pool is not None:
+        await _pool.close()
+        _pool = None
+
+
+async def log_message(thread_id: str, role: str, content: str, metadata: dict | None = None) -> None:
+    args = (thread_id, role, content, Jsonb(metadata) if metadata is not None else None)
+    query = f"""
+        INSERT INTO {SCHEMA_NAME}.messages (thread_id, role, content, metadata)
+        VALUES (%s, %s, %s, %s)
+    """
+    if _pool is not None:
+        async with _pool.connection() as conn:
+            await conn.execute(query, args)
+    else:
+        # Pool not initialized (see module docstring above) -- fall back to a
+        # one-off connection rather than fail the log write outright.
+        base_url = os.environ["NEON_DATABASE_URL"]
+        async with await psycopg.AsyncConnection.connect(base_url, autocommit=True) as conn:
+            await conn.execute(query, args)
     logger.debug("persistence: logged message thread_id=%s role=%s len=%d", thread_id, role, len(content))
