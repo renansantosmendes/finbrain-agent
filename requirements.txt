@@ -13,5 +13,7 @@ langchain-mcp-adapters==0.3.0
 fastapi==0.139.2
 uvicorn==0.51.0
 httpx==0.28.1
+pypdf==6.18.1
+python-multipart==0.0.32
 langgraph-checkpoint-postgres==3.1.2
 psycopg[binary,pool]==3.3.4

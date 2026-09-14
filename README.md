@@ -74,9 +74,10 @@ Ver [persistence.py](persistence.py) para os detalhes de conexão (schema via `s
 ```
 finbrain-agent/
 ├── main_mcp.py           # script de demonstração: roda o agente uma vez via CLI
-├── app.py                # API FastAPI (rotas /chat e /telegram/webhook) — também o entrypoint que o Vercel detecta
+├── app.py                # API FastAPI (rotas /chat, /invoices/analyze e /telegram/webhook) — também o entrypoint que o Vercel detecta
 ├── commands.py           # comandos /price, /technical etc. -- atalhos determinísticos pras skills
-├── telegram.py           # cliente mínimo da Bot API do Telegram (sendMessage, parse do update)
+├── telegram.py           # cliente mínimo da Bot API do Telegram (sendMessage, parse do update, download de documentos)
+├── invoices.py           # extração de texto de faturas em PDF + tool read_credit_card_invoices
 ├── utils/
 │   └── set_telegram_webhook.py  # CLI para registrar/inspecionar/remover o webhook do Telegram
 ├── vercel.json            # config da função serverless (maxDuration, excludeFiles)
@@ -95,6 +96,7 @@ finbrain-agent/
     ├── asset_comparison/
     ├── market_scenario_simulation/
     ├── buy_sell_recommendation/
+    ├── credit_card_insights/
     ├── cripto/
     ├── macro_brasil/
     └── macro_global/
@@ -104,7 +106,7 @@ finbrain-agent/
 
 ## Skills disponíveis
 
-Oito skills cobrem quatro domínios. A documentação detalhada de cada uma está em [skills/README.md](skills/README.md).
+Nove skills cobrem cinco domínios. A documentação detalhada de cada uma está em [skills/README.md](skills/README.md).
 
 ### 📈 Ações
 
@@ -116,6 +118,12 @@ Oito skills cobrem quatro domínios. A documentação detalhada de cada uma est�
 | [`asset-comparison`](skills/asset_comparison/SKILL.md) | Dois ou mais tickers na mesma pergunta | `compare_assets` |
 | [`market-scenario-simulation`](skills/market_scenario_simulation/SKILL.md) | Projeção de cenários futuros, simulação de mercado, Monte Carlo | `generate_synthetic_stock_series_garch_arch` |
 | [`buy-sell-recommendation`](skills/buy_sell_recommendation/SKILL.md) | "Devo comprar ou vender?", sinal de compra/venda para um ticker | `collect_yfinance_data`, `detect_price_outliers`, `generate_synthetic_stock_series_garch_arch` |
+
+### 💳 Finanças pessoais
+
+| Skill | Quando é acionada | Ferramenta principal |
+|---|---|---|
+| [`credit-card-insights`](skills/credit_card_insights/SKILL.md) | Fatura(s) de cartão de crédito em PDF enviada(s) para análise de gastos | `read_credit_card_invoices` (local, ver `invoices.py`) |
 
 ### ₿ Criptomoedas
 
@@ -253,15 +261,33 @@ Além de mensagem livre (roteada pelo LLM via descrição das skills), o `/chat`
 | `/crypto <símbolo>` | `cripto` |
 | `/brazil <indicador>` | `macro-brasil` |
 | `/global <indicador> <país(es)>` | `macro-global` |
+| `/invoices` | `credit-card-insights` (explica como enviar as faturas) |
 | `/help` | lista os comandos acima (não chama o agente) |
 
 Um comando é traduzido para a instrução em linguagem natural que aciona a skill certa (ex.: `/price PETR4` → "Qual o preço atual e o histórico recente da ação PETR4?") antes de ser passado ao agente; o texto original do comando (não o traduzido) é o que fica gravado no log de mensagens, para auditoria fiel do que o usuário digitou.
+
+### Análise de faturas de cartão de crédito (PDF)
+
+`POST /invoices/analyze` recebe até `invoices.MAX_FILES` (20) PDFs de fatura em uma única chamada `multipart/form-data` e devolve uma análise de gastos (skill `credit-card-insights`):
+
+```
+POST /invoices/analyze
+Content-Type: multipart/form-data
+
+files: <fatura1.pdf>, <fatura2.pdf>, ...   # obrigatório, 1 a 20 arquivos
+message: "..."                              # opcional -- pergunta customizada, padrão pede insights de corte de custo
+session_id: "..."                           # opcional -- mesmo comportamento do /chat
+```
+
+O texto de cada PDF é extraído com [pypdf](https://pypdf.readthedocs.io/) **antes** do agente rodar (ver [invoices.py](invoices.py)) e fica disponível para o modelo através da tool `read_credit_card_invoices` — o motivo de não ser um upload direto para uma tool está documentado no docstring do módulo (um LLM não consegue carregar bytes binários de forma confiável como argumento de tool call). Limitações atuais: só PDFs com texto selecionável (nada de digitalização/imagem escaneada) e **sem suporte a PDF protegido por senha**.
+
+Pelo Telegram, basta anexar o PDF como documento no chat — cada arquivo dispara uma análise individual imediata (o Bot API do Telegram não permite anexar vários arquivos numa única mensagem, então o lote de até 20 arquivos só está disponível via API).
 
 ### Bot do Telegram
 
 `app.py` também expõe `POST /telegram/webhook`, que recebe updates do Telegram e responde chamando a Bot API diretamente (ver [telegram.py](telegram.py)). É um **webhook**, não *polling*: como a API roda como função serverless (sem processo de longa duração para dar `getUpdates` em loop), o Telegram é quem empurra cada mensagem para essa rota.
 
-Cada chat do Telegram vira uma sessão própria (`session_id = "telegram-<chat_id>"`), com o mesmo histórico persistido no Postgres e os mesmos comandos (`/price`, `/simulate`, etc.) descritos acima — o Telegram já trata `/comando` nativamente.
+Cada **usuário** do Telegram vira uma sessão própria (`session_id = "telegram-<user_id>"`, onde `user_id` é o `from.id` do Telegram — ver `telegram.session_id_for`/`telegram._sender_id`), com o mesmo histórico persistido no Postgres e os mesmos comandos (`/price`, `/simulate`, etc.) descritos acima — o Telegram já trata `/comando` nativamente. A sessão é ligada à pessoa, não ao chat: isso importa em grupo (o `chat_id` é compartilhado por todo mundo — sem isso, o histórico de usuários diferentes se misturaria numa sessão só) e garante que o mesmo usuário mantém o histórico mesmo que fale com o bot a partir de contextos diferentes. Quando não há `from` no update (ex.: post anônimo de canal), cai de volta para `chat_id`.
 
 **Configuração:**
 

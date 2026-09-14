@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from deepagents import create_deep_agent
@@ -49,6 +49,7 @@ from langfuse.langchain import CallbackHandler
 from langfuse import Langfuse
 
 import commands
+import invoices
 import persistence
 import telegram
 from logging_config import logger
@@ -163,8 +164,12 @@ class AgentRuntime:
         client = MultiServerMCPClient({
             "finbrain": {"transport": "streamable_http", "url": MCP_URL},
         })
-        self._tools = await client.get_tools()
-        logger.info("startup: loaded %d MCP tools", len(self._tools))
+        # read_credit_card_invoices is a local tool (see invoices.py) added
+        # alongside the remote MCP ones -- it doesn't fetch anything itself,
+        # it just reads whatever PDF text /invoices/analyze or the Telegram
+        # webhook already stashed for this turn.
+        self._tools = await client.get_tools() + [invoices.read_credit_card_invoices]
+        logger.info("startup: loaded %d tools (MCP + local)", len(self._tools))
 
         checkpointer = await self._open_checkpointer()
         self._build_agent(checkpointer)
@@ -337,6 +342,56 @@ async def chat(request: ChatRequest, rt: AgentRuntime = Depends(get_runtime)) ->
     return ChatResponse(session_id=session_id, reply=reply)
 
 
+DEFAULT_INVOICE_ANALYSIS_MESSAGE = (
+    "Analise os gastos nas faturas de cartão de crédito que enviei e me dê "
+    "insights para reduzir custos e evitar dívidas."
+)
+
+
+@app.post("/invoices/analyze", response_model=ChatResponse)
+async def analyze_invoices(
+    files: list[UploadFile] = File(..., description=f"PDFs de fatura de cartão de crédito, até {invoices.MAX_FILES} arquivos."),
+    message: str = Form(DEFAULT_INVOICE_ANALYSIS_MESSAGE),
+    session_id: Optional[str] = Form(None),
+    rt: AgentRuntime = Depends(get_runtime),
+) -> ChatResponse:
+    """Batch invoice analysis: up to invoices.MAX_FILES PDFs in one call.
+
+    This is a plain HTTP endpoint, not a tool the model calls -- see
+    invoices.py's module docstring for why (an LLM can't reliably carry PDF
+    bytes through a tool-call argument). The PDFs are extracted to text here,
+    then invoices.read_credit_card_invoices (a real tool) hands that text to
+    the agent during the turn below.
+    """
+    if rt.agent is None:
+        logger.error("invoices: rejected, agent not ready")
+        raise HTTPException(status_code=503, detail="Agent not ready")
+
+    if not files:
+        raise HTTPException(status_code=422, detail="Envie ao menos um arquivo PDF.")
+    if len(files) > invoices.MAX_FILES:
+        raise HTTPException(status_code=422, detail=f"Máximo de {invoices.MAX_FILES} arquivos por análise.")
+
+    session_id = session_id or str(uuid.uuid4())
+    logger.info("invoices: request received session_id=%s n_files=%d", session_id, len(files))
+
+    extractions = [
+        invoices.extract_text(await f.read(), f.filename or "arquivo.pdf")
+        for f in files
+    ]
+    invoices.set_current_invoices(extractions)
+
+    try:
+        try:
+            reply = await _run_turn(rt, session_id, message, tags=["api", "invoices", "financial-agent"])
+        except Exception:
+            raise HTTPException(status_code=500, detail="Agent invocation failed")
+    finally:
+        invoices.clear_current_invoices()
+
+    return ChatResponse(session_id=session_id, reply=reply)
+
+
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request, rt: AgentRuntime = Depends(get_runtime)) -> dict:
     """Receives Telegram updates and replies via the Bot API (see telegram.py).
@@ -359,14 +414,22 @@ async def telegram_webhook(request: Request, rt: AgentRuntime = Depends(get_runt
         logger.warning("telegram: rejected webhook call with malformed/empty JSON body")
         return {"ok": False}
 
+    incoming_document = telegram.extract_incoming_document(update)
+    if incoming_document is not None:
+        chat_id, user_id, document, caption = incoming_document
+        await _handle_telegram_document(rt, chat_id, user_id, document, caption)
+        return {"ok": True}
+
     incoming = telegram.extract_incoming_text(update)
     if incoming is None:
         logger.info("telegram: ignoring update with no text message")
         return {"ok": True}
 
-    chat_id, text = incoming
-    session_id = f"telegram-{chat_id}"
-    logger.info("telegram: update received chat_id=%s text_len=%d", chat_id, len(text))
+    chat_id, user_id, text = incoming
+    # Keyed on the Telegram user, not the chat, so the same person keeps
+    # their history (see telegram._sender_id for why those can differ).
+    session_id = telegram.session_id_for(user_id)
+    logger.info("telegram: update received chat_id=%s user_id=%s text_len=%d", chat_id, user_id, len(text))
 
     if rt.agent is None:
         logger.error("telegram: rejected, agent not ready chat_id=%s", chat_id)
@@ -380,6 +443,51 @@ async def telegram_webhook(request: Request, rt: AgentRuntime = Depends(get_runt
 
     await telegram.send_message(chat_id, reply)
     return {"ok": True}
+
+
+async def _handle_telegram_document(rt: AgentRuntime, chat_id: int, user_id: int, document: dict, caption: str) -> None:
+    """A PDF sent as a Telegram document triggers an immediate, single-file
+    analysis. Telegram has no way to attach multiple files to one message,
+    so there's no batching here -- see /invoices/analyze for up to
+    invoices.MAX_FILES files analyzed together in one call.
+    """
+    # Keyed on the Telegram user, not the chat -- same reasoning as the text
+    # path above.
+    session_id = telegram.session_id_for(user_id)
+    filename = document.get("file_name") or "fatura.pdf"
+    mime_type = document.get("mime_type", "")
+
+    if mime_type != "application/pdf" and not filename.lower().endswith(".pdf"):
+        logger.info("telegram: ignoring non-PDF document chat_id=%s mime_type=%s", chat_id, mime_type)
+        await telegram.send_message(chat_id, f"Só consigo analisar arquivos PDF por aqui (recebi `{mime_type or filename}`).")
+        return
+
+    if rt.agent is None:
+        logger.error("telegram: rejected document, agent not ready chat_id=%s", chat_id)
+        await telegram.send_message(chat_id, "O agente ainda está iniciando, tente novamente em instantes.")
+        return
+
+    content = await telegram.download_file(document["file_id"])
+    if content is None:
+        await telegram.send_message(chat_id, "Não consegui baixar o arquivo do Telegram. Tente enviar novamente.")
+        return
+
+    logger.info("telegram: document received chat_id=%s filename=%s size=%d", chat_id, filename, len(content))
+    invoices.set_current_invoices([invoices.extract_text(content, filename)])
+
+    message = caption.strip() or (
+        "Analise os gastos nesta fatura de cartão de crédito e me dê insights "
+        "para reduzir custos e evitar dívidas."
+    )
+    try:
+        try:
+            reply = await _run_turn(rt, session_id, message, tags=["telegram", "invoices", "financial-agent"])
+        except Exception:
+            reply = "Desculpe, ocorreu um erro ao processar sua fatura. Tente novamente."
+    finally:
+        invoices.clear_current_invoices()
+
+    await telegram.send_message(chat_id, reply)
 
 
 if __name__ == "__main__":

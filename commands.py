@@ -89,6 +89,14 @@ def _brazil(args: str) -> str:
     return f"Qual o valor atual de {indicador} no Brasil?"
 
 
+def _invoices(args: str) -> str:
+    return (
+        "Explique como posso te enviar faturas de cartão de crédito em PDF para você analisar meus gastos, "
+        "incluindo as duas formas disponíveis (endpoint /invoices/analyze da API, até 20 arquivos de uma vez; "
+        "ou como documento anexado no Telegram, um arquivo por vez) e que arquivos protegidos por senha não são suportados."
+    )
+
+
 def _global(args: str) -> str:
     query = args.strip()
     if not query:
@@ -105,6 +113,7 @@ COMMANDS: dict[str, CommandSpec] = {
     "crypto": CommandSpec("/crypto <símbolo>", "Preço atual de uma criptomoeda.", _crypto),
     "brazil": CommandSpec("/brazil <indicador>", "Indicadores macro do Brasil (Selic, IPCA, CDI, dólar).", _brazil),
     "global": CommandSpec("/global <indicador> <país(es)>", "Indicadores macro internacionais (PIB, inflação, desemprego).", _global),
+    "invoices": CommandSpec("/invoices", "Como enviar faturas de cartão de crédito para análise de gastos.", _invoices),
 }
 
 

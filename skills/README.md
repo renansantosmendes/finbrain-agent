@@ -25,6 +25,7 @@ Voltar para o [README principal](../README.md).
 | [`asset-comparison`](#️-asset-comparison) | Ações | [asset_comparison/](asset_comparison/SKILL.md) |
 | [`market-scenario-simulation`](#-market-scenario-simulation) | Ações | [market_scenario_simulation/](market_scenario_simulation/SKILL.md) |
 | [`buy-sell-recommendation`](#-buy-sell-recommendation) | Ações | [buy_sell_recommendation/](buy_sell_recommendation/SKILL.md) |
+| [`credit-card-insights`](#-credit-card-insights) | Finanças pessoais | [credit_card_insights/](credit_card_insights/SKILL.md) |
 | [`cripto`](#-cripto) | Criptomoedas | [cripto/](cripto/SKILL.md) |
 | [`macro-brasil`](#-macro-brasil) | Macro Brasil | [macro_brasil/](macro_brasil/SKILL.md) |
 | [`macro-global`](#-macro-global) | Macro Global | [macro_global/](macro_global/SKILL.md) |
@@ -134,6 +135,24 @@ Voltar para o [README principal](../README.md).
   - Sinal baseado na variação da mediana simulada (P50) vs. preço atual: `> +5%` → 🟢 COMPRA · entre `-5%` e `+5%` → ⚪ MANTER · `< -5%` → 🔴 VENDA.
   - Confiança reduzida se: outlier nos últimos 5 pregões, série com >10% de outliers, ou spread P10–P90 ≥ 15% do preço atual. O sinal nunca se inverte por causa disso — só é qualificado como menos confiável.
 - **Saída:** bloco `🧭 Recomendação` com preço atual, sinal + confiança, tabela de cenários (P10/P50/P90) e outliers encontrados, seguido de `🧠 Avaliação da IA` e do aviso reforçando que é uma simulação estatística e não recomendação oficial de investimento.
+
+---
+
+## 💳 `credit-card-insights`
+
+**Análise de gastos a partir de faturas de cartão de crédito em PDF, para reduzir custos e evitar dívidas.**
+
+- **Gatilhos:** "analise minha fatura", "onde estou gastando mais", "como reduzir meus gastos no cartão", "estou pagando juros/rotativo", "compare minhas últimas faturas", ou qualquer pergunta sobre como enviar uma fatura.
+- **Não usar para:** análise de ações/ativos (isso é `stock-analysis` e as demais skills de ações) — esta skill é só sobre gastos pessoais em fatura de cartão.
+- **Ferramenta obrigatória:** `read_credit_card_invoices()` — sem argumentos, lê o texto já extraído do(s) PDF(s) enviado(s) **nesta mensagem** (ver [invoices.py](../invoices.py)). Diferente das demais tools, ela não busca nada externo — só devolve o que já foi processado antes do agente rodar.
+- **Como os PDFs chegam:** `POST /invoices/analyze` na API (multipart, até 20 arquivos numa chamada) ou um documento anexado no Telegram (um arquivo por mensagem, análise individual). Se a tool não retornar nenhuma fatura, a skill explica ao usuário como enviar em vez de inventar uma análise.
+- **Regras de interpretação:**
+  - Categorizar gastos por tipo (alimentação, transporte, assinaturas, etc.) a partir da descrição de cada transação no texto extraído.
+  - Identificar recorrências/assinaturas e, havendo mais de uma fatura, comparar a evolução do total entre elas.
+  - **Prioridade máxima:** qualquer menção a juros, multa, rotativo ou IOF no texto é um alerta de risco de dívida e deve ser destacado antes do resto.
+  - PDF com `ok=false` (protegido por senha, escaneado sem texto, corrompido) é reportado com o motivo — nunca inventar números para esse arquivo.
+- **Saída:** bloco `💳 Análise de Fatura(s)` com total identificado, tabela de categorias, assinaturas encontradas e alerta de juros/rotativo, seguido de `🧠 Avaliação da IA` com sugestões de corte e do aviso de que não é aconselhamento financeiro profissional.
+- **Limitação atual:** PDFs protegidos por senha não são suportados.
 
 ---
 

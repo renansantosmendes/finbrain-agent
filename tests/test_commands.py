@@ -90,3 +90,11 @@ def test_command_is_case_insensitive():
     assert resolved is not None
     assert resolved.direct_reply is None
     assert "PETR4" in resolved.prompt_for_agent
+
+
+def test_invoices_command_needs_no_argument_and_forwards_to_agent():
+    resolved = commands.resolve("/invoices")
+    assert resolved is not None
+    assert resolved.direct_reply is None
+    assert "/invoices/analyze" in resolved.prompt_for_agent
+    assert "Telegram" in resolved.prompt_for_agent

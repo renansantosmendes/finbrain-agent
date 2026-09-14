@@ -6,6 +6,7 @@ The real agent, MCP tools and Neon connection are never touched here:
 - The TestClient is used WITHOUT the `with` context manager, so FastAPI's
   lifespan (which does real network calls on startup) never runs.
 """
+import json
 import logging
 import uuid
 from unittest.mock import AsyncMock, patch
@@ -76,6 +77,45 @@ class StaleConnectionThenOkAgent:
 class AlwaysStaleConnectionAgent:
     async def ainvoke(self, inputs, config):
         raise psycopg.OperationalError("the connection is closed")
+
+
+class InvoiceAwareAgent:
+    """Simulates the model calling read_credit_card_invoices() during the
+    turn, so tests can assert the extracted PDF text actually reached the
+    tool for this request."""
+
+    def __init__(self, reply: str = "mocked reply"):
+        self.reply = reply
+        self.seen_invoices_json = None
+
+    async def ainvoke(self, inputs, config):
+        self.seen_invoices_json = app_module.invoices.read_credit_card_invoices.invoke({})
+        return {"messages": [FakeMessage(self.reply)]}
+
+
+def _make_minimal_pdf(text: str = "PETR4 compra R$ 120,00") -> bytes:
+    """Hand-writes a minimal valid single-page PDF with `text` drawn on it
+    (pypdf has no page-authoring API)."""
+    content = f"BT /F1 24 Tf 100 700 Td ({text}) Tj ET".encode()
+    objs = [
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> "
+        b"/MediaBox [0 0 612 792] /Contents 5 0 R >>\nendobj\n",
+        b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+        b"5 0 obj\n<< /Length %d >>\nstream\n%s\nendstream\nendobj\n" % (len(content), content),
+    ]
+    pdf = b"%PDF-1.4\n"
+    offsets = []
+    for obj in objs:
+        offsets.append(len(pdf))
+        pdf += obj
+    xref_offset = len(pdf)
+    pdf += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    for off in offsets:
+        pdf += ("%010d 00000 n \n" % off).encode()
+    pdf += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF" % (len(objs) + 1, xref_offset)
+    return pdf
 
 
 @pytest.fixture
@@ -287,13 +327,41 @@ def test_telegram_webhook_replies_to_text_message(client, telegram_send):
     telegram_send.assert_awaited_once_with(555, "mocked reply")
 
 
-def test_telegram_webhook_uses_chat_id_as_session_id(client, telegram_send, fake_runtime):
+def test_telegram_webhook_falls_back_to_chat_id_as_session_id_without_sender(client, telegram_send, fake_runtime):
     test_client, _ = client
     update = {"message": {"chat": {"id": 777}, "text": "oi"}}
     test_client.post("/telegram/webhook", json=update)
 
     _, config = fake_runtime.agent.received_calls[0]
     assert config["configurable"]["thread_id"] == "telegram-777"
+
+
+def test_telegram_webhook_sessions_are_keyed_by_user_not_chat(client, telegram_send, fake_runtime):
+    """Same person (from.id=111), two different chat_ids -- must land on the
+    same thread_id so their history isn't split/lost across chats."""
+    test_client, _ = client
+
+    update_1 = {"message": {"chat": {"id": 111}, "from": {"id": 111}, "text": "oi"}}
+    update_2 = {"message": {"chat": {"id": 999}, "from": {"id": 111}, "text": "de novo"}}
+    test_client.post("/telegram/webhook", json=update_1)
+    test_client.post("/telegram/webhook", json=update_2)
+
+    thread_ids = [config["configurable"]["thread_id"] for _, config in fake_runtime.agent.received_calls]
+    assert thread_ids == ["telegram-111", "telegram-111"]
+
+
+def test_telegram_webhook_different_users_in_same_chat_get_different_sessions(client, telegram_send, fake_runtime):
+    """A group chat (shared chat_id) must not merge two users' history into
+    one thread_id."""
+    test_client, _ = client
+
+    update_1 = {"message": {"chat": {"id": 999}, "from": {"id": 111}, "text": "oi"}}
+    update_2 = {"message": {"chat": {"id": 999}, "from": {"id": 222}, "text": "oi"}}
+    test_client.post("/telegram/webhook", json=update_1)
+    test_client.post("/telegram/webhook", json=update_2)
+
+    thread_ids = [config["configurable"]["thread_id"] for _, config in fake_runtime.agent.received_calls]
+    assert thread_ids == ["telegram-111", "telegram-222"]
 
 
 def test_telegram_webhook_ignores_updates_without_text(client, telegram_send):
@@ -376,4 +444,156 @@ def test_telegram_webhook_replies_when_agent_not_ready(telegram_send):
 
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
+    telegram_send.assert_awaited_once()
+
+
+# --- /invoices/analyze --------------------------------------------------
+
+def test_analyze_invoices_rejects_when_no_files(client):
+    test_client, _ = client
+    resp = test_client.post("/invoices/analyze", files={})
+    assert resp.status_code == 422
+
+
+def test_analyze_invoices_rejects_more_than_max_files(client):
+    test_client, _ = client
+    pdf_bytes = _make_minimal_pdf()
+    files = [
+        ("files", (f"f{i}.pdf", pdf_bytes, "application/pdf"))
+        for i in range(app_module.invoices.MAX_FILES + 1)
+    ]
+    resp = test_client.post("/invoices/analyze", files=files)
+    assert resp.status_code == 422
+
+
+def test_analyze_invoices_happy_path_reaches_the_tool(client, fake_runtime):
+    fake_runtime.agent = InvoiceAwareAgent()
+    test_client, _ = client
+    pdf_bytes = _make_minimal_pdf("VALE3 venda R$ 50,00")
+
+    resp = test_client.post(
+        "/invoices/analyze",
+        files=[("files", ("fatura.pdf", pdf_bytes, "application/pdf"))],
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["reply"] == "mocked reply"
+    uuid.UUID(body["session_id"])  # raises if not a valid uuid
+
+    seen = json.loads(fake_runtime.agent.seen_invoices_json)
+    assert len(seen["invoices"]) == 1
+    assert seen["invoices"][0]["filename"] == "fatura.pdf"
+    assert "VALE3 venda R$ 50,00" in seen["invoices"][0]["text"]
+
+
+def test_analyze_invoices_reuses_provided_session_id(client, fake_runtime):
+    fake_runtime.agent = InvoiceAwareAgent()
+    test_client, _ = client
+    pdf_bytes = _make_minimal_pdf()
+
+    resp = test_client.post(
+        "/invoices/analyze",
+        files=[("files", ("fatura.pdf", pdf_bytes, "application/pdf"))],
+        data={"session_id": "renan-faturas"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["session_id"] == "renan-faturas"
+
+
+def test_analyze_invoices_returns_503_when_agent_not_ready():
+    app.dependency_overrides[get_runtime] = lambda: AgentRuntime()  # agent is None
+    try:
+        resp = TestClient(app).post(
+            "/invoices/analyze",
+            files=[("files", ("fatura.pdf", _make_minimal_pdf(), "application/pdf"))],
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 503
+
+
+# --- /telegram/webhook: documents ---------------------------------------
+
+def test_telegram_webhook_analyzes_pdf_document(client, telegram_send, fake_runtime):
+    fake_runtime.agent = InvoiceAwareAgent()
+    test_client, _ = client
+    pdf_bytes = _make_minimal_pdf("Assinatura Streaming R$ 39,90")
+
+    update = {
+        "message": {
+            "chat": {"id": 999},
+            "document": {"file_id": "abc123", "file_name": "fatura.pdf", "mime_type": "application/pdf"},
+        }
+    }
+
+    with patch.object(app_module.telegram, "download_file", new_callable=AsyncMock) as mock_download:
+        mock_download.return_value = pdf_bytes
+        resp = test_client.post("/telegram/webhook", json=update)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    mock_download.assert_awaited_once_with("abc123")
+    telegram_send.assert_awaited_once_with(999, "mocked reply")
+
+    seen = json.loads(fake_runtime.agent.seen_invoices_json)
+    assert len(seen["invoices"]) == 1
+    assert "Assinatura Streaming R$ 39,90" in seen["invoices"][0]["text"]
+
+
+def test_telegram_webhook_rejects_non_pdf_document(client, telegram_send, fake_runtime):
+    test_client, _ = client
+    update = {
+        "message": {
+            "chat": {"id": 999},
+            "document": {"file_id": "abc123", "file_name": "foto.png", "mime_type": "image/png"},
+        }
+    }
+
+    resp = test_client.post("/telegram/webhook", json=update)
+
+    assert resp.status_code == 200
+    telegram_send.assert_awaited_once()
+    args, _ = telegram_send.await_args
+    assert args[0] == 999
+    assert "PDF" in args[1]
+    assert fake_runtime.agent.received_calls == []  # never reached the agent
+
+
+def test_telegram_webhook_handles_document_download_failure(client, telegram_send):
+    test_client, _ = client
+    update = {
+        "message": {
+            "chat": {"id": 999},
+            "document": {"file_id": "abc123", "file_name": "fatura.pdf", "mime_type": "application/pdf"},
+        }
+    }
+
+    with patch.object(app_module.telegram, "download_file", new_callable=AsyncMock) as mock_download:
+        mock_download.return_value = None
+        resp = test_client.post("/telegram/webhook", json=update)
+
+    assert resp.status_code == 200
+    telegram_send.assert_awaited_once()
+    args, _ = telegram_send.await_args
+    assert args[0] == 999
+    assert "baixar" in args[1].lower()
+
+
+def test_telegram_webhook_document_replies_when_agent_not_ready(telegram_send):
+    app.dependency_overrides[get_runtime] = lambda: AgentRuntime()  # agent is None
+    try:
+        update = {
+            "message": {
+                "chat": {"id": 999},
+                "document": {"file_id": "abc123", "file_name": "fatura.pdf", "mime_type": "application/pdf"},
+            }
+        }
+        resp = TestClient(app).post("/telegram/webhook", json=update)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
     telegram_send.assert_awaited_once()
