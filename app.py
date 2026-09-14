@@ -28,6 +28,7 @@ if sys.platform == "win32":
 from dotenv import load_dotenv
 load_dotenv()
 
+import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
@@ -144,6 +145,12 @@ class AgentRuntime:
         self.langfuse = None
         self.langfuse_handler = None
         self._checkpointer_cm = None
+        self._reconnect_lock = asyncio.Lock()
+        # Cached so a stale checkpointer connection can be swapped out and the
+        # agent rebuilt on it, without re-fetching the prompt/tools -- see
+        # reconnect_checkpointer().
+        self._tools = None
+        self._system_prompt = None
 
     async def startup(self) -> None:
         logger.info("startup: bootstrapping schema, loading prompt/tools/checkpointer")
@@ -151,30 +158,57 @@ class AgentRuntime:
 
         self.langfuse = Langfuse()
         self.langfuse_handler = CallbackHandler()
-        system_prompt = self.langfuse.get_prompt("FINBRAIN_SYSTEM_PROMPT").compile()
+        self._system_prompt = self.langfuse.get_prompt("FINBRAIN_SYSTEM_PROMPT").compile()
 
         client = MultiServerMCPClient({
             "finbrain": {"transport": "streamable_http", "url": MCP_URL},
         })
-        tools = await client.get_tools()
-        logger.info("startup: loaded %d MCP tools", len(tools))
+        self._tools = await client.get_tools()
+        logger.info("startup: loaded %d MCP tools", len(self._tools))
 
+        checkpointer = await self._open_checkpointer()
+        self._build_agent(checkpointer)
+        logger.info("startup: agent ready")
+
+    async def _open_checkpointer(self):
         self._checkpointer_cm = AsyncPostgresSaver.from_conn_string(
             persistence.get_checkpointer_conn_string()
         )
         checkpointer = await self._checkpointer_cm.__aenter__()
         await checkpointer.setup()
+        return checkpointer
 
+    def _build_agent(self, checkpointer) -> None:
         self.agent = create_deep_agent(
             model=MODEL,
-            tools=tools,
+            tools=self._tools,
             skills=["skills"],
             backend=backend,
-            system_prompt=system_prompt,
+            system_prompt=self._system_prompt,
             checkpointer=checkpointer,
             middleware=_build_middleware(),
         )
-        logger.info("startup: agent ready")
+
+    async def reconnect_checkpointer(self) -> None:
+        """Rebuild the checkpointer connection (and the agent bound to it).
+
+        Neon's unpooled endpoint (required here, see persistence.py, since
+        the pooler rejects the search_path startup option) can close an idle
+        connection out from under a warm serverless instance between
+        requests. psycopg doesn't reconnect on its own -- the next query just
+        fails with "the connection is closed" -- so _run_turn calls this once
+        and retries when it sees that.
+        """
+        async with self._reconnect_lock:
+            logger.warning("runtime: checkpointer connection was closed, reconnecting")
+            if self._checkpointer_cm is not None:
+                try:
+                    await self._checkpointer_cm.__aexit__(None, None, None)
+                except Exception:
+                    logger.exception("runtime: error closing stale checkpointer (ignoring)")
+            checkpointer = await self._open_checkpointer()
+            self._build_agent(checkpointer)
+            logger.info("runtime: checkpointer reconnected")
 
     async def shutdown(self) -> None:
         if self.langfuse is not None:
@@ -249,11 +283,22 @@ async def _run_turn(rt: AgentRuntime, session_id: str, message: str, tags: list[
         },
     }
 
-    try:
-        result = await rt.agent.ainvoke(
+    async def _invoke():
+        return await rt.agent.ainvoke(
             {"messages": [{"role": "user", "content": agent_input}]},
             config,
         )
+
+    try:
+        try:
+            result = await _invoke()
+        except psycopg.OperationalError:
+            # Neon closed the checkpointer's idle connection out from under
+            # this warm instance -- reconnect once and retry the same turn
+            # instead of failing every request until the next cold start.
+            logger.warning("chat: checkpointer connection closed, reconnecting and retrying session_id=%s", session_id)
+            await rt.reconnect_checkpointer()
+            result = await _invoke()
     except Exception:
         logger.exception("chat: agent invocation failed session_id=%s", session_id)
         raise

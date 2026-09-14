@@ -10,6 +10,7 @@ import logging
 import uuid
 from unittest.mock import AsyncMock, patch
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -54,6 +55,27 @@ class FakeAgent:
 class FailingAgent:
     async def ainvoke(self, inputs, config):
         raise RuntimeError("mcp server unreachable")
+
+
+class StaleConnectionThenOkAgent:
+    """Simulates Neon closing the checkpointer's idle connection: the first
+    call raises the same error LangGraph's Postgres checkpointer raises in
+    that case, the retry (after a reconnect) succeeds."""
+
+    def __init__(self, reply: str = "mocked reply after reconnect"):
+        self.reply = reply
+        self.calls = 0
+
+    async def ainvoke(self, inputs, config):
+        self.calls += 1
+        if self.calls == 1:
+            raise psycopg.OperationalError("the connection is closed")
+        return {"messages": [FakeMessage(self.reply)]}
+
+
+class AlwaysStaleConnectionAgent:
+    async def ainvoke(self, inputs, config):
+        raise psycopg.OperationalError("the connection is closed")
 
 
 @pytest.fixture
@@ -124,6 +146,30 @@ def test_chat_returns_500_when_agent_invocation_fails(client, fake_runtime):
     test_client, _ = client
     resp = test_client.post("/chat", json={"message": "oi"})
     assert resp.status_code == 500
+
+
+def test_chat_reconnects_checkpointer_and_retries_on_stale_connection(client, fake_runtime):
+    fake_runtime.agent = StaleConnectionThenOkAgent()
+    test_client, _ = client
+
+    with patch.object(fake_runtime, "reconnect_checkpointer", new_callable=AsyncMock) as mock_reconnect:
+        resp = test_client.post("/chat", json={"message": "oi"})
+
+    assert resp.status_code == 200
+    assert resp.json()["reply"] == "mocked reply after reconnect"
+    mock_reconnect.assert_awaited_once()
+    assert fake_runtime.agent.calls == 2
+
+
+def test_chat_returns_500_when_retry_after_reconnect_also_fails(client, fake_runtime):
+    fake_runtime.agent = AlwaysStaleConnectionAgent()
+    test_client, _ = client
+
+    with patch.object(fake_runtime, "reconnect_checkpointer", new_callable=AsyncMock) as mock_reconnect:
+        resp = test_client.post("/chat", json={"message": "oi"})
+
+    assert resp.status_code == 500
+    mock_reconnect.assert_awaited_once()
 
 
 def test_chat_returns_503_when_agent_not_ready():
