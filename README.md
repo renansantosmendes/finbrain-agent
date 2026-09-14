@@ -77,6 +77,8 @@ finbrain-agent/
 ├── app.py                # API FastAPI (rotas /chat e /telegram/webhook) — também o entrypoint que o Vercel detecta
 ├── commands.py           # comandos /price, /technical etc. -- atalhos determinísticos pras skills
 ├── telegram.py           # cliente mínimo da Bot API do Telegram (sendMessage, parse do update)
+├── utils/
+│   └── set_telegram_webhook.py  # CLI para registrar/inspecionar/remover o webhook do Telegram
 ├── vercel.json            # config da função serverless (maxDuration, excludeFiles)
 ├── persistence.py        # schema Postgres (Neon), checkpointer do LangGraph, log de mensagens
 ├── logging_config.py     # configuração do logger "finbrain"
@@ -264,7 +266,13 @@ Cada chat do Telegram vira uma sessão própria (`session_id = "telegram-<chat_i
 
 1. Crie o bot com o [@BotFather](https://t.me/BotFather) (`/newbot`) e copie o token que ele devolve.
 2. Defina `TELEGRAM_BOT_TOKEN` (o token) e `TELEGRAM_WEBHOOK_SECRET` (qualquer string aleatória — usada para validar que a chamada em `/telegram/webhook` realmente veio do Telegram, via header `X-Telegram-Bot-Api-Secret-Token`) tanto no `.env` local quanto nas variáveis de ambiente do projeto no Vercel.
-3. Depois do deploy, registre o webhook **uma vez** apontando para a URL pública do seu projeto:
+3. Depois do deploy, registre o webhook **uma vez** apontando para a URL pública do seu projeto, usando [utils/set_telegram_webhook.py](utils/set_telegram_webhook.py):
+
+   ```bash
+   python -m utils.set_telegram_webhook https://<seu-projeto>.vercel.app
+   ```
+
+   O script lê `TELEGRAM_BOT_TOKEN`/`TELEGRAM_WEBHOOK_SECRET` do `.env` local e chama `setWebhook` com `<url>/telegram/webhook`. Também dá pra usar direto o `curl` equivalente:
 
    ```bash
    curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
@@ -272,7 +280,7 @@ Cada chat do Telegram vira uma sessão própria (`session_id = "telegram-<chat_i
      -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>"
    ```
 
-4. Para conferir o status do webhook a qualquer momento: `https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getWebhookInfo`.
+4. Para conferir o status do webhook a qualquer momento: `python -m utils.set_telegram_webhook --info` (ou `https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getWebhookInfo`). Para remover: `python -m utils.set_telegram_webhook --delete`.
 
 `TELEGRAM_WEBHOOK_SECRET` é opcional, mas sem ele qualquer requisição para `/telegram/webhook` é aceita como se fosse do Telegram — defina-o sempre que a rota estiver publicamente acessível (ou seja, sempre, em produção).
 

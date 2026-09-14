@@ -213,3 +213,121 @@ def test_log_agent_activity_ignores_earlier_turns(caplog):
 
     assert "new_tool" in caplog.text
     assert "old_tool" not in caplog.text
+
+
+# --- /telegram/webhook -------------------------------------------------
+
+@pytest.fixture
+def telegram_send(client):
+    """Patches telegram.send_message so no real HTTP call is made, and makes
+    it available to assert on what would have been sent to the chat.
+
+    Also pins TELEGRAM_WEBHOOK_SECRET to None so these tests don't depend on
+    whatever value a local .env happens to define -- tests that specifically
+    exercise the secret-token check override it themselves.
+    """
+    with patch.object(app_module.telegram, "send_message", new_callable=AsyncMock) as mock_send, \
+         patch.object(app_module.telegram, "TELEGRAM_WEBHOOK_SECRET", None):
+        yield mock_send
+
+
+def test_telegram_webhook_replies_to_text_message(client, telegram_send):
+    test_client, _ = client
+    update = {"message": {"chat": {"id": 555}, "text": "qual o preço da PETR4?"}}
+    resp = test_client.post("/telegram/webhook", json=update)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    telegram_send.assert_awaited_once_with(555, "mocked reply")
+
+
+def test_telegram_webhook_uses_chat_id_as_session_id(client, telegram_send, fake_runtime):
+    test_client, _ = client
+    update = {"message": {"chat": {"id": 777}, "text": "oi"}}
+    test_client.post("/telegram/webhook", json=update)
+
+    _, config = fake_runtime.agent.received_calls[0]
+    assert config["configurable"]["thread_id"] == "telegram-777"
+
+
+def test_telegram_webhook_ignores_updates_without_text(client, telegram_send):
+    test_client, _ = client
+    update = {"message": {"chat": {"id": 555}, "sticker": {"file_id": "abc"}}}
+    resp = test_client.post("/telegram/webhook", json=update)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    telegram_send.assert_not_awaited()
+
+
+def test_telegram_webhook_rejects_malformed_body_instead_of_500(client, telegram_send):
+    """Regression test: an empty/non-JSON body (e.g. a manual curl without
+    -H 'Content-Type: application/json') used to crash `request.json()` and
+    return a 500. A public webhook endpoint must not do that."""
+    test_client, _ = client
+    resp = test_client.post(
+        "/telegram/webhook",
+        content=b"",
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": False}
+    telegram_send.assert_not_awaited()
+
+
+def test_telegram_webhook_rejects_bad_secret_token(client, telegram_send):
+    test_client, _ = client
+    with patch.object(app_module.telegram, "TELEGRAM_WEBHOOK_SECRET", "expected-secret"):
+        update = {"message": {"chat": {"id": 555}, "text": "oi"}}
+        resp = test_client.post(
+            "/telegram/webhook",
+            json=update,
+            headers={"X-Telegram-Bot-Api-Secret-Token": "wrong-secret"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": False}
+    telegram_send.assert_not_awaited()
+
+
+def test_telegram_webhook_accepts_correct_secret_token(client, telegram_send):
+    test_client, _ = client
+    with patch.object(app_module.telegram, "TELEGRAM_WEBHOOK_SECRET", "expected-secret"):
+        update = {"message": {"chat": {"id": 555}, "text": "oi"}}
+        resp = test_client.post(
+            "/telegram/webhook",
+            json=update,
+            headers={"X-Telegram-Bot-Api-Secret-Token": "expected-secret"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    telegram_send.assert_awaited_once()
+
+
+def test_telegram_webhook_sends_error_message_when_agent_fails(client, telegram_send, fake_runtime):
+    fake_runtime.agent = FailingAgent()
+    test_client, _ = client
+    update = {"message": {"chat": {"id": 555}, "text": "oi"}}
+    resp = test_client.post("/telegram/webhook", json=update)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    telegram_send.assert_awaited_once()
+    args, _ = telegram_send.await_args
+    assert args[0] == 555
+    assert "erro" in args[1].lower()
+
+
+def test_telegram_webhook_replies_when_agent_not_ready(telegram_send):
+    app.dependency_overrides[get_runtime] = lambda: AgentRuntime()  # agent is None
+    try:
+        update = {"message": {"chat": {"id": 555}, "text": "oi"}}
+        resp = TestClient(app).post("/telegram/webhook", json=update)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    telegram_send.assert_awaited_once()

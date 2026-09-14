@@ -308,7 +308,12 @@ async def telegram_webhook(request: Request, rt: AgentRuntime = Depends(get_runt
             logger.warning("telegram: rejected webhook call with bad/missing secret token")
             return {"ok": False}
 
-    update = await request.json()
+    try:
+        update = await request.json()
+    except Exception:
+        logger.warning("telegram: rejected webhook call with malformed/empty JSON body")
+        return {"ok": False}
+
     incoming = telegram.extract_incoming_text(update)
     if incoming is None:
         logger.info("telegram: ignoring update with no text message")

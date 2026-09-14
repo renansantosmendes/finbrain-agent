@@ -28,8 +28,10 @@ def extract_incoming_text(update: dict) -> tuple[int, str] | None:
     """Pull (chat_id, text) out of a Telegram update, or None if there's
     nothing to reply to (non-text message, channel post, join event, ...).
     """
+    if not isinstance(update, dict):
+        return None
     message = update.get("message") or update.get("edited_message")
-    if not message or "text" not in message:
+    if not isinstance(message, dict) or "text" not in message:
         return None
     return message["chat"]["id"], message["text"]
 
