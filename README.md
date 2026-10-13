@@ -165,7 +165,7 @@ A API (`app.py`) está pronta para deploy como função serverless Python no Ver
 ### Passos
 
 1. Importe o repositório no [dashboard do Vercel](https://vercel.com/new) (framework preset: "Other").
-2. Configure as variáveis de ambiente do projeto (Settings → Environment Variables) com os mesmos valores do `.env` local: `OPENAI_API_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`, `NEON_DATABASE_URL` e, se for usar o bot do Telegram, `TELEGRAM_BOT_TOKEN` e `TELEGRAM_WEBHOOK_SECRET` (ver **Bot do Telegram** abaixo).
+2. Configure as variáveis de ambiente do projeto (Settings → Environment Variables) com os mesmos valores do `.env` local: `OPENAI_API_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`, `NEON_DATABASE_URL` e, se for usar o bot do Telegram, `TELEGRAM_BOT_TOKEN` e `TELEGRAM_WEBHOOK_SECRET` (ver **Bot do Telegram** abaixo) e, para o front web, `AUTH_JWKS_URL` e `CORS_ALLOWED_ORIGINS` (ver **Front web** abaixo).
 3. Deploy. A cada push, o Vercel builda e publica; o CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) roda os testes antes disso no PR.
 
 ### Limitações conhecidas em produção serverless
@@ -203,6 +203,11 @@ NEON_DATABASE_URL=postgresql://...          # usado para persistência de conver
 
 TELEGRAM_BOT_TOKEN=...                      # opcional — só necessário para o bot do Telegram, ver "Bot do Telegram"
 TELEGRAM_WEBHOOK_SECRET=...                 # opcional — recomendado junto com o token acima
+
+AUTH_JWKS_URL=https://<auth-service>/.well-known/jwks.json  # opcional — exige login no /chat e /invoices/analyze, ver "Front web"
+AUTH_JWT_ISSUER=auth-service                # opcional — padrão auth-service
+AUTH_JWT_AUDIENCE=synapse-apps              # opcional — padrão synapse-apps
+CORS_ALLOWED_ORIGINS=https://<finbrain-front>  # opcional — origens do front web, separadas por vírgula
 ```
 
 O Langfuse é obrigatório na configuração atual, porque o prompt de sistema é carregado de lá. `NEON_DATABASE_URL` é obrigatório para rodar `app.py` (API) e para as chamadas do `main_mcp.py` que usam checkpointer — veja **Persistência de conversas** acima.
@@ -282,6 +287,15 @@ session_id: "..."                           # opcional -- mesmo comportamento do
 O texto de cada PDF é extraído com [pypdf](https://pypdf.readthedocs.io/) **antes** do agente rodar (ver [invoices.py](invoices.py)) e fica disponível para o modelo através da tool `read_credit_card_invoices` — o motivo de não ser um upload direto para uma tool está documentado no docstring do módulo (um LLM não consegue carregar bytes binários de forma confiável como argumento de tool call). Limitações atuais: só PDFs com texto selecionável (nada de digitalização/imagem escaneada) e **sem suporte a PDF protegido por senha**.
 
 Pelo Telegram, basta anexar o PDF como documento no chat — cada arquivo dispara uma análise individual imediata (o Bot API do Telegram não permite anexar vários arquivos numa única mensagem, então o lote de até 20 arquivos só está disponível via API).
+
+### Front web (`finbrain_front`)
+
+O front web ([finbrain_front](../finbrain_front)) chama `/chat` e `/invoices/analyze` direto do navegador, com o usuário logado no **auth_service** compartilhado. Para isso, o [web_auth.py](web_auth.py) faz duas coisas, ambas desligadas por padrão:
+
+- **CORS** — `CORS_ALLOWED_ORIGINS` lista as origens do front que podem chamar a API pelo navegador.
+- **Login obrigatório** — com `AUTH_JWKS_URL` definido, `/chat` e `/invoices/analyze` exigem `Authorization: Bearer <access_token>` emitido pelo auth_service (RS256, verificado pela chave pública do JWKS, com `iss` e `aud` checados). Sem token ou com token inválido a resposta é `401`; se o JWKS estiver fora do ar, `503`.
+
+Com o login ligado, cada conversa fica **isolada por usuário**: o `session_id` que o front vê precisa ser um UUID e o thread real no checkpointer é `web:<id do usuário>:<session_id>`. Assim, mesmo que alguém copie o `session_id` de outra pessoa, só consegue abrir uma conversa sua. Sem `AUTH_JWKS_URL`, tudo continua como antes (sem login, `session_id` livre). O webhook do Telegram não é afetado.
 
 ### Bot do Telegram
 
