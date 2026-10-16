@@ -16,7 +16,6 @@ Persistence model (see persistence.py):
 import asyncio
 import os
 import sys
-import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -30,6 +29,8 @@ load_dotenv()
 
 import psycopg
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from deepagents import create_deep_agent
@@ -48,10 +49,12 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langfuse.langchain import CallbackHandler
 from langfuse import Langfuse
 
+import chat_stream as chat_stream_turns
 import commands
 import invoices
 import persistence
 import telegram
+import web_auth
 from logging_config import logger
 
 MCP_URL = "https://finbrain-mcp.vercel.app/mcp"
@@ -241,6 +244,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="FinBrain Agent API", lifespan=lifespan)
 
+# Lets the web front end (finbrain_front) call /chat and /invoices/analyze
+# from the browser. Empty by default: no browser origin is allowed until
+# CORS_ALLOWED_ORIGINS is configured.
+if web_auth.cors_allowed_origins():
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=web_auth.cors_allowed_origins(),
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
@@ -255,6 +269,38 @@ class ChatResponse(BaseModel):
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+def _turn_config(rt: AgentRuntime, session_id: str, tags: list[str]) -> dict:
+    """LangGraph config of one turn: thread id, Langfuse callback and tags.
+
+    Parameters
+    ----------
+    rt : AgentRuntime
+        Runtime whose Langfuse callback handler is attached to the turn.
+    session_id : str
+        Thread id the checkpointer stores the conversation under.
+    tags : list[str]
+        Labels shown on the trace in Langfuse.
+
+    Returns
+    -------
+    dict
+        Config dictionary accepted by ``ainvoke`` and ``astream_events``.
+
+    Example
+    -------
+    >>> _turn_config(AgentRuntime(), "abc", ["api"])["configurable"]["thread_id"]
+    'abc'
+    """
+    return {
+        "configurable": {"thread_id": session_id},
+        "callbacks": [rt.langfuse_handler] if rt.langfuse_handler else [],
+        "metadata": {
+            "langfuse_session_id": session_id,
+            "langfuse_tags": tags,
+        },
+    }
 
 
 async def _run_turn(rt: AgentRuntime, session_id: str, message: str, tags: list[str]) -> str:
@@ -278,14 +324,7 @@ async def _run_turn(rt: AgentRuntime, session_id: str, message: str, tags: list[
 
     agent_input = resolved.prompt_for_agent if resolved is not None else message
 
-    config = {
-        "configurable": {"thread_id": session_id},
-        "callbacks": [rt.langfuse_handler] if rt.langfuse_handler else [],
-        "metadata": {
-            "langfuse_session_id": session_id,
-            "langfuse_tags": tags,
-        },
-    }
+    config = _turn_config(rt, session_id, tags)
 
     async def _invoke():
         return await rt.agent.ainvoke(
@@ -346,20 +385,49 @@ async def _run_turn(rt: AgentRuntime, session_id: str, message: str, tags: list[
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest, rt: AgentRuntime = Depends(get_runtime)) -> ChatResponse:
+async def chat(
+    request: ChatRequest,
+    rt: AgentRuntime = Depends(get_runtime),
+    user: Optional[web_auth.WebUser] = Depends(web_auth.optional_web_user),
+) -> ChatResponse:
     if rt.agent is None:
         logger.error("chat: rejected, agent not ready")
         raise HTTPException(status_code=503, detail="Agent not ready")
 
-    session_id = request.session_id or str(uuid.uuid4())
-    logger.info("chat: request received session_id=%s message_len=%d", session_id, len(request.message))
+    # With web authentication on, the thread is namespaced by the user id;
+    # the client only ever sees its own session id (see web_auth).
+    session_id, thread_id = web_auth.resolve_session(user, request.session_id)
+    logger.info("chat: request received session_id=%s message_len=%d", thread_id, len(request.message))
 
     try:
-        reply = await _run_turn(rt, session_id, request.message, tags=["api", "financial-agent"])
+        reply = await _run_turn(rt, thread_id, request.message, tags=["api", "financial-agent"])
     except Exception:
         raise HTTPException(status_code=500, detail="Agent invocation failed")
 
     return ChatResponse(session_id=session_id, reply=reply)
+
+
+@app.post("/chat/stream")
+async def chat_stream(
+    request: ChatRequest,
+    rt: AgentRuntime = Depends(get_runtime),
+    user: Optional[web_auth.WebUser] = Depends(web_auth.optional_web_user),
+) -> StreamingResponse:
+    """Answer a message as Server-Sent Events, so the client can show the
+    reply while the agent writes it. Same request body as /chat; see
+    chat_stream.py for the event types."""
+    if rt.agent is None:
+        logger.error("chat/stream: rejected, agent not ready")
+        raise HTTPException(status_code=503, detail="Agent not ready")
+
+    session_id, thread_id = web_auth.resolve_session(user, request.session_id)
+    config = _turn_config(rt, thread_id, ["api", "financial-agent", "stream"])
+    frames = chat_stream_turns.stream_turn(rt, session_id, thread_id, request.message, config)
+    return StreamingResponse(
+        frames,
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 DEFAULT_INVOICE_ANALYSIS_MESSAGE = (
@@ -374,6 +442,7 @@ async def analyze_invoices(
     message: str = Form(DEFAULT_INVOICE_ANALYSIS_MESSAGE),
     session_id: Optional[str] = Form(None),
     rt: AgentRuntime = Depends(get_runtime),
+    user: Optional[web_auth.WebUser] = Depends(web_auth.optional_web_user),
 ) -> ChatResponse:
     """Batch invoice analysis: up to invoices.MAX_FILES PDFs in one call.
 
@@ -392,8 +461,8 @@ async def analyze_invoices(
     if len(files) > invoices.MAX_FILES:
         raise HTTPException(status_code=422, detail=f"Máximo de {invoices.MAX_FILES} arquivos por análise.")
 
-    session_id = session_id or str(uuid.uuid4())
-    logger.info("invoices: request received session_id=%s n_files=%d", session_id, len(files))
+    session_id, thread_id = web_auth.resolve_session(user, session_id)
+    logger.info("invoices: request received session_id=%s n_files=%d", thread_id, len(files))
 
     file_payloads = [(await f.read(), f.filename or "arquivo.pdf") for f in files]
     # extract_text is CPU-bound (PDF parsing) -- off the event loop so it
@@ -407,7 +476,7 @@ async def analyze_invoices(
 
     try:
         try:
-            reply = await _run_turn(rt, session_id, message, tags=["api", "invoices", "financial-agent"])
+            reply = await _run_turn(rt, thread_id, message, tags=["api", "invoices", "financial-agent"])
         except Exception:
             raise HTTPException(status_code=500, detail="Agent invocation failed")
     finally:
