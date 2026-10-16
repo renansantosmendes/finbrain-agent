@@ -96,7 +96,7 @@ def test_stream_sends_tokens_then_done_with_the_final_reply(make_client):
 def test_stream_reports_tools_while_they_run(make_client):
     client, _, _, _ = make_client(StreamingFakeAgent(tools=["get_quote"], tokens=["ok"], reply="ok"))
     frames = parse_frames(client.post("/chat/stream", json={"message": "cotação"}).text)
-    assert frames[0] == ("tool", {"name": "get_quote", "status": "start"})
+    assert frames[0][0] == "tool" and frames[0][1]["name"] == "get_quote" and frames[0][1]["status"] == "start"
     assert frames[1] == ("tool", {"name": "get_quote", "status": "end"})
 
 
@@ -154,3 +154,31 @@ def test_stream_uses_the_stream_tag_and_the_thread_id(make_client):
     assert version == "v2"
     assert config["configurable"]["thread_id"] == "thread-1"
     assert "stream" in config["metadata"]["langfuse_tags"]
+
+
+class ToolInputAgent:
+    async def astream_events(self, inputs, config, version):
+        yield {
+            "event": "on_tool_start",
+            "name": "collect_yfinance_data",
+            "data": {"input": {"ticker": "PETR4.SA", "period": "1mo", "limit": 10, "tickers": ["A", "B"], "extra": object()}},
+        }
+        yield {"event": "on_tool_end", "name": "collect_yfinance_data", "data": {}}
+        yield {"event": "on_chat_model_stream", "data": {"chunk": FakeChunk("ok")}}
+
+    async def aget_state(self, config):
+        return SimpleNamespace(values={"messages": [FakeMessage("ok")]})
+
+
+def test_tool_start_event_carries_the_arguments_in_json_safe_form(make_client):
+    client, _, _, _ = make_client(ToolInputAgent())
+    frames = parse_frames(client.post("/chat/stream", json={"message": "cotação"}).text)
+    assert frames[0][0] == "tool"
+    assert frames[0][1]["name"] == "collect_yfinance_data"
+    assert frames[0][1]["status"] == "start"
+    arguments = frames[0][1]["input"]
+    assert arguments["ticker"] == "PETR4.SA"
+    assert arguments["tickers"] == ["A", "B"]
+    assert arguments["limit"] == 10
+    assert isinstance(arguments["extra"], str)
+    assert frames[1][1] == {"name": "collect_yfinance_data", "status": "end"}

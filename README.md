@@ -256,7 +256,7 @@ Reenviar o mesmo `session_id` em requisições seguintes mantém o histórico da
 
 Mesmo corpo do `/chat`, mas a resposta é `text/event-stream` (Server-Sent Events), para o cliente mostrar o texto enquanto o agente escreve. Eventos, cada um em `event:` + `data:` (JSON):
 
-- `tool` — `{"name", "status"}` com `status` `start` ou `end`, quando uma ferramenta começa ou termina.
+- `tool` — `{"name", "status"}` com `status` `start` ou `end`, quando uma ferramenta começa ou termina. No `start`, há também `input`: os argumentos da chamada (por exemplo, `{"ticker": "PETR4.SA"}`), com valores convertidos para tipos simples do JSON.
 - `token` — `{"text"}`, trechos do texto do modelo. Texto escrito antes de uma chamada de ferramenta também aparece aqui.
 - `done` — `{"session_id", "reply"}`, resposta final. Ela substitui o que foi streamado: use este texto como a resposta definitiva.
 - `error` — `{"code", "message"}`, quando o turno falha. Nesse caso nada é gravado como resposta do assistente.

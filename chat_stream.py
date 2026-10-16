@@ -97,10 +97,47 @@ def _events_to_frames(event: dict[str, Any]) -> list[str]:
     if kind == "on_chat_model_stream":
         text = text_of_chunk(event.get("data", {}).get("chunk"))
         return [sse("token", {"text": text})] if text else []
-    if kind in ("on_tool_start", "on_tool_end"):
-        status = "start" if kind == "on_tool_start" else "end"
-        return [sse("tool", {"name": event.get("name", ""), "status": status})]
+    if kind == "on_tool_start":
+        payload = {"name": event.get("name", ""), "status": "start", "input": _json_safe_input(event.get("data", {}).get("input"))}
+        return [sse("tool", payload)]
+    if kind == "on_tool_end":
+        return [sse("tool", {"name": event.get("name", ""), "status": "end"})]
     return []
+
+
+def _json_safe_input(arguments: Any) -> dict[str, Any]:
+    """Keep the tool arguments that can travel as JSON.
+
+    Strings, numbers, booleans and lists of them are sent as they are; any
+    other value is sent as its text, so the event never fails to serialize.
+
+    Parameters
+    ----------
+    arguments : Any
+        The ``input`` of a tool-start event, normally a dictionary.
+
+    Returns
+    -------
+    dict[str, Any]
+        The arguments with JSON-compatible values, or an empty dictionary when
+        the event carried no arguments.
+
+    Example
+    -------
+    >>> _json_safe_input({"ticker": "PETR4.SA", "period": "1mo"})
+    {'ticker': 'PETR4.SA', 'period': '1mo'}
+    """
+    if not isinstance(arguments, dict):
+        return {}
+    safe: dict[str, Any] = {}
+    for key, value in arguments.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            safe[str(key)] = value
+        elif isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
+            safe[str(key)] = list(value)
+        else:
+            safe[str(key)] = str(value)
+    return safe
 
 
 async def _direct_command_frames(session_id: str, message: str, reply: str) -> AsyncIterator[str]:
