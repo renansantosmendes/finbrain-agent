@@ -29,6 +29,7 @@ load_dotenv()
 
 import psycopg
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -48,6 +49,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langfuse.langchain import CallbackHandler
 from langfuse import Langfuse
 
+import chat_stream as chat_stream_turns
 import commands
 import invoices
 import persistence
@@ -269,6 +271,38 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+def _turn_config(rt: AgentRuntime, session_id: str, tags: list[str]) -> dict:
+    """LangGraph config of one turn: thread id, Langfuse callback and tags.
+
+    Parameters
+    ----------
+    rt : AgentRuntime
+        Runtime whose Langfuse callback handler is attached to the turn.
+    session_id : str
+        Thread id the checkpointer stores the conversation under.
+    tags : list[str]
+        Labels shown on the trace in Langfuse.
+
+    Returns
+    -------
+    dict
+        Config dictionary accepted by ``ainvoke`` and ``astream_events``.
+
+    Example
+    -------
+    >>> _turn_config(AgentRuntime(), "abc", ["api"])["configurable"]["thread_id"]
+    'abc'
+    """
+    return {
+        "configurable": {"thread_id": session_id},
+        "callbacks": [rt.langfuse_handler] if rt.langfuse_handler else [],
+        "metadata": {
+            "langfuse_session_id": session_id,
+            "langfuse_tags": tags,
+        },
+    }
+
+
 async def _run_turn(rt: AgentRuntime, session_id: str, message: str, tags: list[str]) -> str:
     """Resolve a slash command or invoke the agent, logging the turn either
     way. Shared by /chat and the Telegram webhook so both channels share one
@@ -290,14 +324,7 @@ async def _run_turn(rt: AgentRuntime, session_id: str, message: str, tags: list[
 
     agent_input = resolved.prompt_for_agent if resolved is not None else message
 
-    config = {
-        "configurable": {"thread_id": session_id},
-        "callbacks": [rt.langfuse_handler] if rt.langfuse_handler else [],
-        "metadata": {
-            "langfuse_session_id": session_id,
-            "langfuse_tags": tags,
-        },
-    }
+    config = _turn_config(rt, session_id, tags)
 
     async def _invoke():
         return await rt.agent.ainvoke(
@@ -378,6 +405,29 @@ async def chat(
         raise HTTPException(status_code=500, detail="Agent invocation failed")
 
     return ChatResponse(session_id=session_id, reply=reply)
+
+
+@app.post("/chat/stream")
+async def chat_stream(
+    request: ChatRequest,
+    rt: AgentRuntime = Depends(get_runtime),
+    user: Optional[web_auth.WebUser] = Depends(web_auth.optional_web_user),
+) -> StreamingResponse:
+    """Answer a message as Server-Sent Events, so the client can show the
+    reply while the agent writes it. Same request body as /chat; see
+    chat_stream.py for the event types."""
+    if rt.agent is None:
+        logger.error("chat/stream: rejected, agent not ready")
+        raise HTTPException(status_code=503, detail="Agent not ready")
+
+    session_id, thread_id = web_auth.resolve_session(user, request.session_id)
+    config = _turn_config(rt, thread_id, ["api", "financial-agent", "stream"])
+    frames = chat_stream_turns.stream_turn(rt, session_id, thread_id, request.message, config)
+    return StreamingResponse(
+        frames,
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 DEFAULT_INVOICE_ANALYSIS_MESSAGE = (

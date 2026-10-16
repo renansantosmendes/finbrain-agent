@@ -252,6 +252,17 @@ POST /chat
 
 Reenviar o mesmo `session_id` em requisições seguintes mantém o histórico da conversa — a memória vive no Postgres (ver acima), não em RAM, então sobrevive a reinícios do processo.
 
+#### Resposta em streaming (`/chat/stream`)
+
+Mesmo corpo do `/chat`, mas a resposta é `text/event-stream` (Server-Sent Events), para o cliente mostrar o texto enquanto o agente escreve. Eventos, cada um em `event:` + `data:` (JSON):
+
+- `tool` — `{"name", "status"}` com `status` `start` ou `end`, quando uma ferramenta começa ou termina.
+- `token` — `{"text"}`, trechos do texto do modelo. Texto escrito antes de uma chamada de ferramenta também aparece aqui.
+- `done` — `{"session_id", "reply"}`, resposta final. Ela substitui o que foi streamado: use este texto como a resposta definitiva.
+- `error` — `{"code", "message"}`, quando o turno falha. Nesse caso nada é gravado como resposta do assistente.
+
+Comandos (`/help` etc.) respondem só com `done`. A mensagem do usuário e a resposta final são gravadas no Postgres como no `/chat`. A implementação está em [chat_stream.py](chat_stream.py).
+
 #### Comandos (`/comando`)
 
 Além de mensagem livre (roteada pelo LLM via descrição das skills), o `/chat` aceita comandos determinísticos definidos em [commands.py](commands.py) — resolvidos **antes** do agente rodar, então um comando inválido/desconhecido responde na hora, sem gastar chamada de LLM:
