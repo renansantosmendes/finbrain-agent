@@ -36,6 +36,7 @@ class WebUser:
 
     user_id: str
     email: Optional[str]
+    name: Optional[str] = None
 
 
 def auth_jwks_url() -> Optional[str]:
@@ -87,7 +88,11 @@ def verify_access_token(token: str, jwks_url: str) -> WebUser:
             detail="Invalid or expired access token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return WebUser(user_id=str(claims["sub"]), email=claims.get("email"))
+    return WebUser(
+        user_id=str(claims["sub"]),
+        email=claims.get("email"),
+        name=claims.get("name"),
+    )
 
 
 async def optional_web_user(authorization: Optional[str] = Header(default=None)) -> Optional[WebUser]:

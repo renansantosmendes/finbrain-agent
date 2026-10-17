@@ -45,12 +45,15 @@ O logger `finbrain` também registra, por requisição de `/chat`:
 
 ### Persistência de conversas
 
-O agente usa memória real entre turnos, e essa memória sobrevive a reinícios de processo (incluindo cold starts em serverless) porque nada fica só em RAM — tudo vive no Postgres (Neon), no schema dedicado `agent_conversations`:
+O agente usa memória real entre turnos, e essa memória sobrevive a reinícios de processo (incluindo cold starts em serverless) porque nada fica só em RAM — tudo vive no Postgres (Neon), no schema dedicado `finbrain` (modelo completo em [db/schema.sql](db/schema.sql), aplicado com `uv run python db/apply_schema.py`):
 
-- **Checkpoints do LangGraph** (`AsyncPostgresSaver`) — estado completo da conversa por `thread_id`/`session_id`, o que dá ao agente memória de fato.
-- **Tabela `messages`** — log legível (thread_id, role, content, created_at) para consulta/auditoria fora do formato interno do LangGraph.
+- **Checkpoints do LangGraph** (`AsyncPostgresSaver`, tabelas `checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`) — estado completo da conversa por `thread_id`, o que dá ao agente memória de fato.
+- **`conversations` e `messages`** — a conversa de cada usuário autenticado (`thread_id = web:<user_id>:<uuid>`) e o texto legível de cada mensagem, na ordem.
+- **`legacy_agent_messages`** — histórico antigo do agente, sem dono (threads de teste, Telegram e modo aberto). Só para consulta.
 
-Ver [persistence.py](persistence.py) para os detalhes de conexão (schema via `search_path`, contorno do pooler do Neon).
+Só threads de usuário autenticado são gravadas em `messages`: sem dono, a mensagem não tem a quem ser associada. Modo aberto e Telegram continuam funcionando, mas o histórico deles não é salvo na conversa.
+
+As rotas `/me/*` (perfil, estado, cenários, conversas e trilho de chamadas) leem e gravam esse modelo, com o mesmo token do auth_service; ver [state_api.py](state_api.py) e [state_store.py](state_store.py). Antes de cada turno de um usuário autenticado, `/chat`, `/chat/stream` e `/invoices/analyze` criam o perfil e o registro da conversa, se ainda não existirem. Ver [persistence.py](persistence.py) para os detalhes de conexão (schema via `search_path`, contorno do pooler do Neon).
 
 ### Middlewares de produção
 
