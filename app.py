@@ -53,6 +53,8 @@ import chat_stream as chat_stream_turns
 import commands
 import invoices
 import persistence
+import state_api
+import state_store
 import telegram
 import web_auth
 from logging_config import logger
@@ -243,6 +245,44 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="FinBrain Agent API", lifespan=lifespan)
+app.include_router(state_api.router)
+
+
+async def _open_web_conversation(
+    user: Optional[web_auth.WebUser],
+    thread_id: str,
+) -> None:
+    """Make sure a signed-in user has a profile and a record for the thread.
+
+    Only web threads of an authenticated user are recorded. A failure is
+    logged and does not stop the turn: the agent still answers, but the
+    transcript of that turn may be missing from the database.
+
+    Parameters
+    ----------
+    user : Optional[web_auth.WebUser]
+        User behind the request, or None in open mode.
+    thread_id : str
+        Thread id the turn runs on.
+
+    Returns
+    -------
+    None
+    """
+    if user is None or persistence.owner_user_id_of_thread(thread_id) is None:
+        return
+    if user.email is None:
+        logger.warning("chat: token without e-mail, conversation not recorded thread_id=%s", thread_id)
+        return
+    try:
+        await state_store.upsert_user(
+            user.user_id,
+            user.email,
+            user.name or user.email.split("@", 1)[0],
+        )
+        await state_store.ensure_conversation(user.user_id, thread_id)
+    except Exception:
+        logger.exception("chat: could not record the conversation thread_id=%s", thread_id)
 
 # Lets the web front end (finbrain_front) call /chat and /invoices/analyze
 # from the browser. Empty by default: no browser origin is allowed until
@@ -398,6 +438,7 @@ async def chat(
     # the client only ever sees its own session id (see web_auth).
     session_id, thread_id = web_auth.resolve_session(user, request.session_id)
     logger.info("chat: request received session_id=%s message_len=%d", thread_id, len(request.message))
+    await _open_web_conversation(user, thread_id)
 
     try:
         reply = await _run_turn(rt, thread_id, request.message, tags=["api", "financial-agent"])
@@ -421,6 +462,7 @@ async def chat_stream(
         raise HTTPException(status_code=503, detail="Agent not ready")
 
     session_id, thread_id = web_auth.resolve_session(user, request.session_id)
+    await _open_web_conversation(user, thread_id)
     config = _turn_config(rt, thread_id, ["api", "financial-agent", "stream"])
     frames = chat_stream_turns.stream_turn(rt, session_id, thread_id, request.message, config)
     return StreamingResponse(
@@ -463,6 +505,7 @@ async def analyze_invoices(
 
     session_id, thread_id = web_auth.resolve_session(user, session_id)
     logger.info("invoices: request received session_id=%s n_files=%d", thread_id, len(files))
+    await _open_web_conversation(user, thread_id)
 
     file_payloads = [(await f.read(), f.filename or "arquivo.pdf") for f in files]
     # extract_text is CPU-bound (PDF parsing) -- off the event loop so it
